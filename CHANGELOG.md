@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/PedroTrincheiras/Kraty/compare/sdk-server-python-v0.13.0...sdk-server-python-v0.13.1) (2026-08-17)
+
+
+### Documentation
+
+* **sdks:** bump install snippets — clients v0.24.0, server-ts v0.14.0 ([c9e9d83](https://github.com/PedroTrincheiras/Kraty/commit/c9e9d83c402d8af1d285093d5faec415cdf4e500))
+
 ## [0.13.0](https://github.com/PedroTrincheiras/Kraty/compare/sdk-server-python-v0.12.0...sdk-server-python-v0.13.0) (2026-07-17)
 
 
