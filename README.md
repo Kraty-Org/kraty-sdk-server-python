@@ -25,14 +25,14 @@ GitHub repo against a tagged release.
 
 ```bash
 # With uv (recommended):
-uv add 'kraty-server-sdk @ git+https://github.com/PedroTrincheiras/kraty-sdk-server-python.git@v0.13.0'
+uv add 'kraty-server-sdk @ git+https://github.com/Kraty-Org/kraty-sdk-server-python.git@v0.14.0'
 
 # Or pip:
-pip install 'git+https://github.com/PedroTrincheiras/kraty-sdk-server-python.git@v0.13.0'
+pip install 'git+https://github.com/Kraty-Org/kraty-sdk-server-python.git@v0.14.0'
 ```
 
 Browse releases at
-<https://github.com/PedroTrincheiras/kraty-sdk-server-python/releases>.
+<https://github.com/Kraty-Org/kraty-sdk-server-python/releases>.
 Once we publish to PyPI (v1.0) you'll be able to swap to
 `uv add kraty-server-sdk`.
 
