@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.15.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-python-v0.14.0...sdk-server-python-v0.15.0) (2026-08-24)
+
+
+### Features
+
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **friends:** player social graph — friend codes, requests, presence, blocking ([4430123](https://github.com/Kraty-Org/Kraty/commit/4430123e34264b40910f538f32d431453d15a042))
+* **friends:** social graph + matchmade-session score fix + Sessions tab ([f347a22](https://github.com/Kraty-Org/Kraty/commit/f347a220ec65fd38b5db7eed2b7dfb324405479d))
+* **players:** per-player synthetic-identity override (server SDK + admin + portal + docs) ([906fd8c](https://github.com/Kraty-Org/Kraty/commit/906fd8c74cab043b5c5fcca5150dbf594a341e79))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+
+
+### Bug Fixes
+
+* **ci:** alphabetise kraty_server_sdk import in test_client ([989e4e8](https://github.com/Kraty-Org/Kraty/commit/989e4e817ca3b34119c9cb0b2eeba70808e4734a))
+* **leaderboards:** merge server-derived country on direct-score paths ([72ff4a7](https://github.com/Kraty-Org/Kraty/commit/72ff4a75428f4f9ac952ccfc65b7649d75d3193f))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+* **sdks:** bump install snippets — clients v0.24.0, server-ts v0.14.0 ([c9e9d83](https://github.com/Kraty-Org/Kraty/commit/c9e9d83c402d8af1d285093d5faec415cdf4e500))
+* **sdks:** bump install snippets — clients v0.25.0, server-ts v0.15.0, server-py v0.14.0 ([5c114d8](https://github.com/Kraty-Org/Kraty/commit/5c114d83e2c611ba6267cbb00bce5435decdc0cd))
+* **sdks:** bump install snippets — clients v0.26.0, server-ts v0.16.0, server-py v0.15.0 ([e1581ce](https://github.com/Kraty-Org/Kraty/commit/e1581ceee55c65a4ee07cfa81587c221bcd1060d))
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs for the v0.13.0 / v0.9.0 release ([79ee827](https://github.com/Kraty-Org/Kraty/commit/79ee8271b43a8b5d299bcb94aa91ccea21459820))
+* **sdks:** bump install snippets + READMEs for the v0.14.0 / v0.10.0 release ([87797b6](https://github.com/Kraty-Org/Kraty/commit/87797b602f0bbbdca10f8ca6d34b4309d51be06b))
+* **sdks:** bump install snippets + READMEs for v0.15.0 / v0.11.0 release ([53ca1be](https://github.com/Kraty-Org/Kraty/commit/53ca1beae10f1fcab38c2c3c94c6b75aaad0757a))
+* **sdks:** bump install snippets + READMEs for v0.16.0 / v0.12.0 release ([9bcb424](https://github.com/Kraty-Org/Kraty/commit/9bcb42492e71114205f58d9a193e6d17554abde7))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+* **sdks:** correct python server-SDK install snippet to v0.13.1 ([e77f1c0](https://github.com/Kraty-Org/Kraty/commit/e77f1c0de6a36422c452e92d4d3f0da1ca73a55f))
+
 ## [0.14.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-python-v0.13.1...sdk-server-python-v0.14.0) (2026-08-21)
 
 
