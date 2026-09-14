@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.2](https://github.com/Kraty-Org/Kraty/compare/sdk-server-python-v0.17.1...sdk-server-python-v0.17.2) (2026-09-14)
+
+
+### Documentation
+
+* **sdks:** bump install snippets — clients v0.29.0, server-ts v0.18.1, server-py v0.17.1 ([#77](https://github.com/Kraty-Org/Kraty/issues/77)) ([a6a4ff1](https://github.com/Kraty-Org/Kraty/commit/a6a4ff118d6b37afe55e07fb0811c03ad4e5b7ab))
+
 ## [0.17.1](https://github.com/Kraty-Org/Kraty/compare/sdk-server-python-v0.17.0...sdk-server-python-v0.17.1) (2026-08-27)
 
 
