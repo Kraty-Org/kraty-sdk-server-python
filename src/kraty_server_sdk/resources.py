@@ -9,6 +9,7 @@ the methods translate.
 
 from __future__ import annotations
 
+import builtins
 import urllib.parse
 from typing import Any
 
@@ -760,6 +761,208 @@ class GuildsClient:
         """POST ``/server/v1/guilds/:guildId/disband``: every member
         leaves, then the guild closes. Irreversible."""
         return _data(self._client.request("POST", f"/server/v1/guilds/{_enc(guild_id)}/disband"))
+
+
+class PurchasesClient:
+    """``/server/v1/players/:externalId/purchases``: server-authoritative
+    purchase ingest (docs/22).
+
+    Report a purchase once your backend has validated the receipt, with
+    ``validation_status="verified"``. Idempotent on ``transaction_id``: a
+    replay returns the stored row with ``deduplicated: True``, and a
+    verified replay of a client-reported purchase marks it verified.
+    """
+
+    def __init__(self, client: KratyAdminClient) -> None:
+        self._client = client
+
+    def track(
+        self,
+        external_player_id: str,
+        *,
+        transaction_id: str,
+        store: str,
+        product_id: str,
+        amount_minor: int,
+        currency: str,
+        product_type: str | None = None,
+        receipt: str | None = None,
+        purchased_at: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        validation_status: str | None = None,
+        offer_instance_id: str | None = None,
+    ) -> dict[str, Any]:
+        """POST ``/server/v1/players/:externalId/purchases``: record a
+        real-money purchase.
+
+        Args:
+            transaction_id: The store's canonical transaction id, the same
+                one the client reports: the StoreKit 2 ``transactionId`` on
+                the App Store (never ``originalTransactionId``), the
+                ``orderId`` (``GPA.…``) on Google Play.
+            store: ``app_store``, ``google_play``, ``steam``, ``epic``,
+                ``amazon``, ``microsoft``, ``playstation``, ``nintendo``,
+                ``web`` or ``other``.
+            amount_minor: Minor units as charged (``499`` is $4.99).
+            currency: ISO 4217, e.g. ``"USD"``.
+            validation_status: ``"verified"`` once Apple/Google confirmed
+                the receipt; otherwise leave it out.
+            offer_instance_id: The player offer (``instanceId`` from
+                ``offers.list`` or the client's list) the purchase was made
+                from. Required for the offer to be delivered; without it the
+                purchase only counts as that offer's revenue (docs/26).
+
+        Returns: ``TrackPurchaseResult``. Its ``offer`` is the attribution
+        (``None`` when none): when ``offer["studioFulfils"]`` is true,
+        deliver ``offer["contents"]`` yourself.
+        """
+        body: dict[str, Any] = {
+            "transactionId": transaction_id,
+            "store": store,
+            "productId": product_id,
+            "amountMinor": amount_minor,
+            "currency": currency,
+        }
+        if product_type is not None:
+            body["productType"] = product_type
+        if receipt is not None:
+            body["receipt"] = receipt
+        if purchased_at is not None:
+            body["purchasedAt"] = purchased_at
+        if metadata is not None:
+            body["metadata"] = metadata
+        if validation_status is not None:
+            body["validationStatus"] = validation_status
+        if offer_instance_id is not None:
+            body["offerInstanceId"] = offer_instance_id
+        env = self._client.request(
+            "POST",
+            f"/server/v1/players/{_enc(external_player_id)}/purchases",
+            body=body,
+        )
+        return _data(env)
+
+
+class OffersClient:
+    """``/server/v1/players/:externalId/offers``: real-money offers for
+    server-driven storefronts, and authoritative trigger reports (docs/26).
+
+    Your backend is the verified door for an offer purchase: report it with
+    ``purchases.track(..., validation_status="verified",
+    offer_instance_id=offer["instanceId"])``.
+    """
+
+    def __init__(self, client: KratyAdminClient) -> None:
+        self._client = client
+
+    def list(
+        self,
+        external_player_id: str,
+        *,
+        limit: int | None = None,
+        level: int | None = None,
+    ) -> builtins.list[dict[str, Any]]:
+        """GET ``/server/v1/players/:externalId/offers``: the offers the
+        player can be shown now, highest priority first (``limit`` ≤ 20,
+        default 10). ``level`` is the player's current level, for offers
+        that trigger on reaching one. Records no impression.
+
+        Returns: a list of ``SdkOffer`` dicts (``instanceId``, ``offerKey``,
+        ``current`` with ``skus`` and ``contents``, ``expiresAt``, …).
+        ``variantKey`` is the A/B variant the player sees (the tiers and
+        presentation already reflect it; ``None`` for the base config) and
+        ``linkedEventKey`` the key of the event the offer is linked to
+        (``None`` when it isn't). The list already applies the game-wide offer
+        caps: at most "listed at once" offers, highest priority first.
+        """
+        params: dict[str, str] = {}
+        if limit is not None:
+            params["limit"] = str(limit)
+        if level is not None:
+            params["level"] = str(level)
+        query = f"?{urllib.parse.urlencode(params)}" if params else ""
+        env = self._client.request(
+            "GET", f"/server/v1/players/{_enc(external_player_id)}/offers{query}"
+        )
+        data = env.get("data") if isinstance(env, dict) else None
+        return [o for o in data if isinstance(o, dict)] if isinstance(data, builtins.list) else []
+
+    def trigger(
+        self,
+        external_player_id: str,
+        trigger: dict[str, Any],
+        *,
+        player_context: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """POST ``/server/v1/players/:externalId/offers/triggers``: report
+        what happened so the offers listening to it arm.
+
+        Args:
+            trigger: One of (camelCase, as on the wire):
+
+                * ``{"type": "fail_event", "key": str, "consecutive"?: int}``
+                * ``{"type": "resource_depleted", "resource": str, "required": int,
+                  "available": int, "secondsToRegen"?: int}``
+                * ``{"type": "level_reached", "level": int}``
+            player_context: Feeds offer eligibility.
+            idempotency_key: Stamped automatically when omitted.
+
+        Returns: ``{"offers": [SdkOffer]}``, the newly armed offers that can
+        be shown now (empty when none did).
+        """
+        body: dict[str, Any] = {"trigger": trigger}
+        if player_context is not None:
+            body["playerContext"] = player_context
+        if idempotency_key is not None:
+            body["idempotencyKey"] = idempotency_key
+        env = self._client.request(
+            "POST",
+            f"/server/v1/players/{_enc(external_player_id)}/offers/triggers",
+            body=body,
+        )
+        return _data(env)
+
+    def claim(
+        self,
+        external_player_id: str,
+        instance_id: str,
+        tier: int,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """POST ``/server/v1/players/:externalId/offers/:instanceId/claim``:
+        claim the current free tier of a chain offer
+        (``offer["current"]["type"] == "free"``), for server-driven
+        storefronts. No store and never revenue (docs/26 § 4.2.1).
+
+        Args:
+            instance_id: The offer's ``instanceId``.
+            tier: The tier the player tapped (``offer["tier"]``); it must still
+                be the current, free tier.
+            idempotency_key: Stamped automatically when omitted. A retry with
+                the same key replays the first answer.
+
+        Returns: ``{"claim": OfferClaimResult, "offer": SdkOffer}``, the offer
+        after the claim (the next tier, or ``completed``). When
+        ``claim["studioFulfils"]`` is true (the offer is set to game delivers; by default Kraty delivers, so do not grant it too), deliver
+        ``claim["contents"]`` yourself; when ``claim["granted"]``, Kraty
+        granted them. Deliver each claim from one path only (this response
+        or the ``offer.tier_claimed`` webhook), and de-duplicate on
+        ``claim["claimId"]``.
+
+        Raises: ``KratyServerError`` with ``code == "conflict"`` when refused;
+        ``details["reason"]`` is ``tier_changed``, ``tier_not_free`` or
+        ``offer_closed`` and ``details["offer"]`` is the offer now.
+        """
+        body: dict[str, Any] = {"tier": tier}
+        if idempotency_key is not None:
+            body["idempotencyKey"] = idempotency_key
+        env = self._client.request(
+            "POST",
+            f"/server/v1/players/{_enc(external_player_id)}/offers/{_enc(instance_id)}/claim",
+            body=body,
+        )
+        return _data(env)
 
 
 class HealthClient:

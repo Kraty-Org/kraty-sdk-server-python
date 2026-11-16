@@ -50,13 +50,15 @@ from kraty_server_sdk.resources import (
     InventoryClient,
     LeaderboardsClient,
     LobbiesClient,
+    OffersClient,
     ModerationClient,
     PlayersClient,
+    PurchasesClient,
     WalletClient,
 )
 from kraty_server_sdk.webhook import verify_webhook
 
-__version__ = "0.17.3"
+__version__ = "0.18.0"
 
 __all__ = [
     "ChatClient",
@@ -71,8 +73,10 @@ __all__ = [
     "KratyServerError",
     "LeaderboardsClient",
     "LobbiesClient",
+    "OffersClient",
     "ModerationClient",
     "PlayersClient",
+    "PurchasesClient",
     "RequestInfo",
     "RetryConfig",
     "WalletClient",

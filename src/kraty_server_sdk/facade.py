@@ -19,8 +19,10 @@ from kraty_server_sdk.resources import (
     LeaderboardsClient,
     LobbiesClient,
     MigrateClient,
+    OffersClient,
     ModerationClient,
     PlayersClient,
+    PurchasesClient,
     WalletClient,
 )
 
@@ -72,6 +74,8 @@ class KratyServer:
         self.health = HealthClient(self.client)
         self.migrate = MigrateClient(self.client)
         self.guilds = GuildsClient(self.client)
+        self.purchases = PurchasesClient(self.client)
+        self.offers = OffersClient(self.client)
         self.chat = ChatClient(self.client)
         self.moderation = ModerationClient(self.client)
 

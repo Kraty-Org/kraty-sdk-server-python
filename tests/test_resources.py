@@ -624,6 +624,161 @@ def test_guilds_moderation(respx_mock, make_kraty):
     assert json.loads(leader.calls.last.request.content)["externalPlayerId"] == "carol"
 
 
+# ─── offers + purchases (docs/26) ────────────────────────────────────
+
+INSTANCE_ID = "5b0c1f3e-7d4a-4f8e-9c2b-1a6d3e8f0b47"
+
+
+def test_offers_list_builds_query_and_unwraps(respx_mock, make_kraty):
+    route = respx_mock.get(f"{BASE_URL}/server/v1/players/player%2042/offers?limit=5&level=12").mock(
+        return_value=httpx.Response(200, json={"data": [{"instanceId": INSTANCE_ID, "offerKey": "starter"}]})
+    )
+    k = make_kraty()
+    out = k.offers.list("player 42", limit=5, level=12)
+    assert route.called
+    assert out == [{"instanceId": INSTANCE_ID, "offerKey": "starter"}]
+
+
+def test_offers_list_without_options_and_empty(respx_mock, make_kraty):
+    respx_mock.get(f"{BASE_URL}/server/v1/players/p1/offers").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+    assert make_kraty().offers.list("p1") == []
+
+
+def test_offers_trigger_sends_union_context_and_stamped_key(respx_mock, make_kraty):
+    route = respx_mock.post(f"{BASE_URL}/server/v1/players/p1/offers/triggers").mock(
+        side_effect=[
+            httpx.Response(200, json={"data": {"offers": [{"instanceId": INSTANCE_ID}]}}),
+            httpx.Response(200, json={"data": {"offers": []}}),
+        ]
+    )
+    k = make_kraty()
+    armed = k.offers.trigger(
+        "p1",
+        {"type": "fail_event", "key": "level_failed", "consecutive": 2},
+        player_context={"level": 7},
+    )
+    assert armed == {"offers": [{"instanceId": INSTANCE_ID}]}
+    assert json.loads(route.calls[0].request.content) == {
+        "trigger": {"type": "fail_event", "key": "level_failed", "consecutive": 2},
+        "playerContext": {"level": 7},
+        "idempotencyKey": "idem-1",
+    }
+    none = k.offers.trigger(
+        "p1",
+        {"type": "resource_depleted", "resource": "lives", "required": 1, "available": 0},
+        idempotency_key="mine",
+    )
+    assert none == {"offers": []}
+    assert json.loads(route.calls[1].request.content) == {
+        "trigger": {"type": "resource_depleted", "resource": "lives", "required": 1, "available": 0},
+        "idempotencyKey": "mine",
+    }
+
+
+def test_offers_claim_posts_tier_with_stamped_key(respx_mock, make_kraty):
+    claim = {"claimId": "c-1", "tier": 1, "granted": False, "studioFulfils": True}
+    after = {"claim": claim, "offer": {"instanceId": INSTANCE_ID, "tier": 2}}
+    route = respx_mock.post(f"{BASE_URL}/server/v1/players/player%2042/offers/{INSTANCE_ID}/claim").mock(
+        side_effect=[httpx.Response(200, json={"data": after}), httpx.Response(200, json={"data": after})]
+    )
+    k = make_kraty()
+    out = k.offers.claim("player 42", INSTANCE_ID, 1)
+    assert out["claim"]["studioFulfils"] is True
+    assert out["offer"]["tier"] == 2
+    assert json.loads(route.calls[0].request.content) == {"tier": 1, "idempotencyKey": "idem-1"}
+    k.offers.claim("player 42", INSTANCE_ID, tier=1, idempotency_key="mine")
+    assert json.loads(route.calls[1].request.content) == {"tier": 1, "idempotencyKey": "mine"}
+
+
+def test_offers_claim_refusal_surfaces_reason(respx_mock, make_kraty):
+    respx_mock.post(f"{BASE_URL}/server/v1/players/p1/offers/{INSTANCE_ID}/claim").mock(
+        return_value=httpx.Response(
+            409,
+            json={
+                "error": {
+                    "code": "conflict",
+                    "message": "the current tier is not the one claimed",
+                    "details": {"reason": "tier_changed", "offer": {"instanceId": INSTANCE_ID, "tier": 2}},
+                }
+            },
+        )
+    )
+    with pytest.raises(KratyServerError) as exc_info:
+        make_kraty().offers.claim("p1", INSTANCE_ID, 1)
+    assert exc_info.value.status == 409
+    assert exc_info.value.code == "conflict"
+    assert exc_info.value.details["reason"] == "tier_changed"
+    assert exc_info.value.details["offer"]["tier"] == 2
+
+
+def test_purchases_track_passes_offer_instance_id(respx_mock, make_kraty):
+    offer = {"offerId": "o1", "method": "explicit", "status": "granted", "granted": True}
+    route = respx_mock.post(f"{BASE_URL}/server/v1/players/p1/purchases").mock(
+        return_value=httpx.Response(201, json={"data": {"purchaseId": "pu1", "offer": offer}})
+    )
+    k = make_kraty()
+    out = k.purchases.track(
+        "p1",
+        transaction_id="GPA.1",
+        store="google_play",
+        product_id="com.game.starter",
+        amount_minor=499,
+        currency="USD",
+        validation_status="verified",
+        offer_instance_id=INSTANCE_ID,
+    )
+    assert out["offer"] == offer
+    body = json.loads(route.calls.last.request.content)
+    assert body["offerInstanceId"] == INSTANCE_ID
+    assert body["validationStatus"] == "verified"
+    assert body["transactionId"] == "GPA.1"
+    assert "receipt" not in body
+
+
+def test_purchases_track_without_offer_omits_field(respx_mock, make_kraty):
+    route = respx_mock.post(f"{BASE_URL}/server/v1/players/p1/purchases").mock(
+        return_value=httpx.Response(201, json={"data": {"purchaseId": "pu1", "offer": None}})
+    )
+    out = make_kraty().purchases.track(
+        "p1", transaction_id="t1", store="app_store", product_id="gems", amount_minor=99, currency="USD"
+    )
+    assert out["offer"] is None
+    assert "offerInstanceId" not in json.loads(route.calls.last.request.content)
+
+
+def test_offers_revision4_fields_pass_through(respx_mock, make_kraty):
+    """Revision 4 (docs/26 § 13): the variant and linked event of an offer, and
+    the variant of an attributed purchase, null and set."""
+    respx_mock.get(f"{BASE_URL}/server/v1/players/p1/offers").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"instanceId": INSTANCE_ID, "variantKey": "b", "linkedEventKey": "lava_quest"},
+                    {"instanceId": INSTANCE_ID, "variantKey": None, "linkedEventKey": None},
+                ]
+            },
+        )
+    )
+    out = make_kraty().offers.list("p1")
+    assert out[0]["variantKey"] == "b"
+    assert out[0]["linkedEventKey"] == "lava_quest"
+    assert out[1]["variantKey"] is None
+    assert out[1]["linkedEventKey"] is None
+
+    respx_mock.post(f"{BASE_URL}/server/v1/players/p1/purchases").mock(
+        return_value=httpx.Response(
+            201, json={"data": {"purchaseId": "pu1", "offer": {"offerId": "o1", "variantKey": "b"}}}
+        )
+    )
+    tracked = make_kraty().purchases.track(
+        "p1", transaction_id="t2", store="app_store", product_id="gems", amount_minor=99, currency="USD"
+    )
+    assert tracked["offer"]["variantKey"] == "b"
+
+
 def test_chat_reads_and_posts(respx_mock, make_kraty):
     conv = "0b8a6c56-49bd-4d5a-9d38-1f2b6a5f9b3e"
     lst = respx_mock.get(f"{BASE_URL}/server/v1/players/alice/chat/conversations?kind=direct").mock(
