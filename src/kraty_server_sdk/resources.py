@@ -676,6 +676,92 @@ class PlayersClient:
         return blocked if isinstance(blocked, list) else []
 
 
+class GuildsClient:
+    """``/server/v1/guilds*``: guild reads and studio-side moderation
+    (docs/25).
+
+    Pinned to the API key's environment: a guild of the other environment
+    reads as ``not_found``. Every write is audited (``actorKind: api_key``)
+    and fires the matching ``guild.*`` webhook.
+    """
+
+    def __init__(self, client: KratyAdminClient) -> None:
+        self._client = client
+
+    def list(
+        self,
+        *,
+        q: str | None = None,
+        player: str | None = None,
+        include_disbanded: bool = False,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> dict[str, Any]:
+        """GET ``/server/v1/guilds``: newest first. ``q`` matches names,
+        ``player`` finds the guilds a player is in or was in. Returns
+        ``{"guilds": [GuildAdminSummary], "total": int}``.
+        """
+        params: dict[str, str] = {}
+        if q:
+            params["q"] = q
+        if player:
+            params["player"] = player
+        if include_disbanded:
+            params["includeDisbanded"] = "true"
+        if limit is not None:
+            params["limit"] = str(limit)
+        if offset is not None:
+            params["offset"] = str(offset)
+        query = f"?{urllib.parse.urlencode(params)}" if params else ""
+        return _data(self._client.request("GET", f"/server/v1/guilds{query}"))
+
+    def get(self, guild_id: str) -> dict[str, Any]:
+        """GET ``/server/v1/guilds/:guildId``: roster, pending join
+        requests and membership history."""
+        return _data(self._client.request("GET", f"/server/v1/guilds/{_enc(guild_id)}"))
+
+    def for_player(self, external_player_id: str) -> dict[str, Any]:
+        """GET ``/server/v1/players/:externalId/guild``: the player's
+        current guild (or ``None``), their role and their stints."""
+        return _data(
+            self._client.request("GET", f"/server/v1/players/{_enc(external_player_id)}/guild")
+        )
+
+    def update(self, guild_id: str, **patch: Any) -> dict[str, Any]:
+        """PATCH ``/server/v1/guilds/:guildId``: moderate the profile
+        (``name``, ``description``, ``badge``, ``country``, ``joinType``,
+        ``metadata``). Bypasses the studio's name filter."""
+        return _data(
+            self._client.request("PATCH", f"/server/v1/guilds/{_enc(guild_id)}", body=patch)
+        )
+
+    def remove_member(self, guild_id: str, external_player_id: str) -> dict[str, Any]:
+        """POST ``/server/v1/guilds/:guildId/members/:externalId/remove``:
+        moderation removal (no rejoin block, unlike a kick)."""
+        return _data(
+            self._client.request(
+                "POST",
+                f"/server/v1/guilds/{_enc(guild_id)}/members/{_enc(external_player_id)}/remove",
+            )
+        )
+
+    def set_leader(self, guild_id: str, external_player_id: str) -> dict[str, Any]:
+        """POST ``/server/v1/guilds/:guildId/leader``: the old leader
+        becomes a co-leader."""
+        return _data(
+            self._client.request(
+                "POST",
+                f"/server/v1/guilds/{_enc(guild_id)}/leader",
+                body={"externalPlayerId": external_player_id},
+            )
+        )
+
+    def disband(self, guild_id: str) -> dict[str, Any]:
+        """POST ``/server/v1/guilds/:guildId/disband``: every member
+        leaves, then the guild closes. Irreversible."""
+        return _data(self._client.request("POST", f"/server/v1/guilds/{_enc(guild_id)}/disband"))
+
+
 class HealthClient:
     """``/server/v1/ping``: connectivity + key-info echo."""
 
@@ -783,3 +869,174 @@ def _data(env: Any) -> dict[str, Any]:
     # Defensive fallback: if the server ever drops the envelope, hand
     # back whatever's there so callers can still inspect it.
     return env_dict
+
+
+def _query(params: dict[str, Any]) -> str:
+    clean = {k: str(v) for k, v in params.items() if v is not None}
+    return f"?{urllib.parse.urlencode(clean)}" if clean else ""
+
+
+class ChatClient:
+    """``/server/v1/chat*`` (docs/26): read conversations (original and
+    filtered text, deleted messages included), post as the game, delete
+    messages. Pinned to the API key's environment.
+    """
+
+    def __init__(self, client: KratyAdminClient) -> None:
+        self._client = client
+
+    def conversations_for(
+        self,
+        external_player_id: str,
+        *,
+        kind: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> dict[str, Any]:
+        """GET ``/server/v1/players/:externalId/chat/conversations``.
+        Returns ``{"conversations": [...], "nextOffset": int | None}``."""
+        q = _query({"kind": kind, "limit": limit, "offset": offset})
+        return _data(
+            self._client.request(
+                "GET", f"/server/v1/players/{_enc(external_player_id)}/chat/conversations{q}"
+            )
+        )
+
+    def conversation(self, conversation_id: str) -> dict[str, Any]:
+        """GET ``/server/v1/chat/conversations/:id``."""
+        return _data(self._client.request("GET", f"/server/v1/chat/conversations/{_enc(conversation_id)}"))
+
+    def messages(
+        self,
+        conversation_id: str,
+        *,
+        before: int | None = None,
+        after: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """GET ``/server/v1/chat/conversations/:id/messages``: oldest to
+        newest; ``before`` / ``after`` are sequence cursors."""
+        q = _query({"before": before, "after": after, "limit": limit})
+        return _data(
+            self._client.request("GET", f"/server/v1/chat/conversations/{_enc(conversation_id)}/messages{q}")
+        )
+
+    def post(
+        self,
+        conversation_id: str,
+        *,
+        text: str | None = None,
+        custom_type: str | None = None,
+        payload: Any = None,
+    ) -> dict[str, Any]:
+        """POST ``/server/v1/chat/conversations/:id/messages``: post as the
+        game (``sender.kind: server``)."""
+        return _data(
+            self._client.request(
+                "POST",
+                f"/server/v1/chat/conversations/{_enc(conversation_id)}/messages",
+                body=_message_body(text, custom_type, payload),
+            )
+        )
+
+    def announce(
+        self,
+        channel_key: str,
+        *,
+        text: str | None = None,
+        custom_type: str | None = None,
+        payload: Any = None,
+    ) -> dict[str, Any]:
+        """POST ``/server/v1/chat/channels/:key/messages``: an announcement
+        in a public channel."""
+        return _data(
+            self._client.request(
+                "POST",
+                f"/server/v1/chat/channels/{_enc(channel_key)}/messages",
+                body=_message_body(text, custom_type, payload),
+            )
+        )
+
+    def delete_message(self, message_id: str) -> dict[str, Any]:
+        """DELETE ``/server/v1/chat/messages/:id`` (audited; fires
+        ``chat.message_deleted``)."""
+        return _data(self._client.request("DELETE", f"/server/v1/chat/messages/{_enc(message_id)}"))
+
+
+def _message_body(text: str | None, custom_type: str | None, payload: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {}
+    if text is not None:
+        body["text"] = text
+    if custom_type is not None:
+        body["customType"] = custom_type
+    if payload is not None:
+        body["payload"] = payload
+    return body
+
+
+class ModerationClient:
+    """``/server/v1/moderation*`` and player restrictions (docs/26): the
+    report queue, review decisions, warnings / chat mutes / chat bans.
+    Works in every game, chat or not.
+    """
+
+    def __init__(self, client: KratyAdminClient) -> None:
+        self._client = client
+
+    def reports(
+        self, *, status: str | None = None, limit: int | None = None, offset: int | None = None
+    ) -> list[dict[str, Any]]:
+        """GET ``/server/v1/moderation/reports``: newest first."""
+        q = _query({"status": status, "limit": limit, "offset": offset})
+        return _data(self._client.request("GET", f"/server/v1/moderation/reports{q}"))["reports"]
+
+    def player_case(self, external_player_id: str) -> dict[str, Any]:
+        """GET ``/server/v1/players/:externalId/moderation``: reports with
+        evidence, restrictions and recent messages."""
+        return _data(
+            self._client.request("GET", f"/server/v1/players/{_enc(external_player_id)}/moderation")
+        )
+
+    def resolve(self, external_player_id: str, *, decision: str, **fields: Any) -> dict[str, Any]:
+        """POST ``/server/v1/players/:externalId/moderation/resolve``.
+        ``decision``: dismiss, no_action, warn, mute, chat_ban, ban. Optional
+        ``note``, ``reason``, ``durationHours``, ``deleteMessageIds``,
+        ``reportIds``."""
+        return _data(
+            self._client.request(
+                "POST",
+                f"/server/v1/players/{_enc(external_player_id)}/moderation/resolve",
+                body={"decision": decision, **fields},
+            )
+        )
+
+    def restrictions(self, external_player_id: str) -> list[dict[str, Any]]:
+        """GET ``/server/v1/players/:externalId/restrictions``: history."""
+        return _data(
+            self._client.request("GET", f"/server/v1/players/{_enc(external_player_id)}/restrictions")
+        )["restrictions"]
+
+    def restrict(
+        self,
+        external_player_id: str,
+        *,
+        kind: str,
+        reason: str | None = None,
+        duration_hours: int | None = None,
+    ) -> dict[str, Any]:
+        """POST ``/server/v1/players/:externalId/restrictions``: a warning,
+        chat_mute (needs ``duration_hours``) or chat_ban."""
+        body: dict[str, Any] = {"kind": kind}
+        if reason is not None:
+            body["reason"] = reason
+        if duration_hours is not None:
+            body["durationHours"] = duration_hours
+        return _data(
+            self._client.request(
+                "POST", f"/server/v1/players/{_enc(external_player_id)}/restrictions", body=body
+            )
+        )
+
+    def lift(self, restriction_id: str) -> dict[str, Any]:
+        """POST ``/server/v1/restrictions/:id/lift``."""
+        return _data(self._client.request("POST", f"/server/v1/restrictions/{_enc(restriction_id)}/lift"))

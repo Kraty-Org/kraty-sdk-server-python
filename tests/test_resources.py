@@ -574,3 +574,97 @@ def test_health_ping_returns_key_info(respx_mock, make_kraty):
     p = k.health.ping()
     assert p["ok"] is True
     assert p["apiKey"]["permissionSet"] == "server_integration"
+
+
+GUILD_ID = "0b8a6c56-49bd-4d5a-9d38-1f2b6a5f9b3e"
+
+
+def test_guilds_list_builds_query_and_unwraps(respx_mock, make_kraty):
+    route = respx_mock.get(
+        f"{BASE_URL}/server/v1/guilds?q=owls&player=alice&includeDisbanded=true&limit=5"
+    ).mock(return_value=httpx.Response(200, json={"data": {"guilds": [], "total": 0}}))
+    k = make_kraty()
+    out = k.guilds.list(q="owls", player="alice", include_disbanded=True, limit=5)
+    assert out == {"guilds": [], "total": 0}
+    assert route.called
+
+
+def test_guilds_reads(respx_mock, make_kraty):
+    respx_mock.get(f"{BASE_URL}/server/v1/guilds/{GUILD_ID}").mock(
+        return_value=httpx.Response(200, json={"data": {"guildId": GUILD_ID, "members": []}})
+    )
+    respx_mock.get(f"{BASE_URL}/server/v1/players/alice/guild").mock(
+        return_value=httpx.Response(200, json={"data": {"guild": None, "role": None, "history": []}})
+    )
+    k = make_kraty()
+    assert k.guilds.get(GUILD_ID)["guildId"] == GUILD_ID
+    assert k.guilds.for_player("alice")["guild"] is None
+
+
+def test_guilds_moderation(respx_mock, make_kraty):
+    patch = respx_mock.patch(f"{BASE_URL}/server/v1/guilds/{GUILD_ID}").mock(
+        return_value=httpx.Response(200, json={"data": {"guildId": GUILD_ID}})
+    )
+    remove = respx_mock.post(f"{BASE_URL}/server/v1/guilds/{GUILD_ID}/members/bob/remove").mock(
+        return_value=httpx.Response(200, json={"data": {"disbanded": False, "guild": {}}})
+    )
+    leader = respx_mock.post(f"{BASE_URL}/server/v1/guilds/{GUILD_ID}/leader").mock(
+        return_value=httpx.Response(200, json={"data": {"guildId": GUILD_ID}})
+    )
+    disband = respx_mock.post(f"{BASE_URL}/server/v1/guilds/{GUILD_ID}/disband").mock(
+        return_value=httpx.Response(200, json={"data": {"guildId": GUILD_ID}})
+    )
+    k = make_kraty()
+    k.guilds.update(GUILD_ID, name="Clean")
+    k.guilds.remove_member(GUILD_ID, "bob")
+    k.guilds.set_leader(GUILD_ID, "carol")
+    k.guilds.disband(GUILD_ID)
+    assert json.loads(patch.calls.last.request.content)["name"] == "Clean"
+    assert remove.called and disband.called
+    assert json.loads(leader.calls.last.request.content)["externalPlayerId"] == "carol"
+
+
+def test_chat_reads_and_posts(respx_mock, make_kraty):
+    conv = "0b8a6c56-49bd-4d5a-9d38-1f2b6a5f9b3e"
+    lst = respx_mock.get(f"{BASE_URL}/server/v1/players/alice/chat/conversations?kind=direct").mock(
+        return_value=httpx.Response(200, json={"data": {"conversations": [], "nextOffset": None}})
+    )
+    msgs = respx_mock.get(f"{BASE_URL}/server/v1/chat/conversations/{conv}/messages?after=3").mock(
+        return_value=httpx.Response(200, json={"data": {"messages": [], "hasMore": False}})
+    )
+    ann = respx_mock.post(f"{BASE_URL}/server/v1/chat/channels/news/messages").mock(
+        return_value=httpx.Response(201, json={"data": {"messageId": "m1", "senderKind": "server"}})
+    )
+    dele = respx_mock.delete(f"{BASE_URL}/server/v1/chat/messages/m1").mock(
+        return_value=httpx.Response(200, json={"data": {"messageId": "m1", "deleted": True}})
+    )
+    k = make_kraty()
+    assert k.chat.conversations_for("alice", kind="direct")["conversations"] == []
+    assert k.chat.messages(conv, after=3)["hasMore"] is False
+    assert k.chat.announce("news", text="Maintenance at 5pm")["senderKind"] == "server"
+    assert k.chat.delete_message("m1")["deleted"] is True
+    assert lst.called and msgs.called and ann.called and dele.called
+    assert json.loads(ann.calls[0].request.content)["text"] == "Maintenance at 5pm"
+
+
+def test_moderation_flow(respx_mock, make_kraty):
+    reports = respx_mock.get(f"{BASE_URL}/server/v1/moderation/reports?status=open").mock(
+        return_value=httpx.Response(200, json={"data": {"reports": [{"reportId": "r1"}]}})
+    )
+    resolve = respx_mock.post(f"{BASE_URL}/server/v1/players/bob/moderation/resolve").mock(
+        return_value=httpx.Response(200, json={"data": {"decision": "mute", "reportsClosed": 1}})
+    )
+    restrict = respx_mock.post(f"{BASE_URL}/server/v1/players/bob/restrictions").mock(
+        return_value=httpx.Response(201, json={"data": {"restrictionId": "x1"}})
+    )
+    lift = respx_mock.post(f"{BASE_URL}/server/v1/restrictions/x1/lift").mock(
+        return_value=httpx.Response(200, json={"data": {"restrictionId": "x1", "active": False}})
+    )
+    k = make_kraty()
+    assert k.moderation.reports(status="open")[0]["reportId"] == "r1"
+    assert k.moderation.resolve("bob", decision="mute", durationHours=24)["reportsClosed"] == 1
+    k.moderation.restrict("bob", kind="chat_mute", duration_hours=1)
+    k.moderation.lift("x1")
+    assert json.loads(resolve.calls[0].request.content)["durationHours"] == 24
+    assert json.loads(restrict.calls[0].request.content)["kind"] == "chat_mute"
+    assert reports.called and lift.called

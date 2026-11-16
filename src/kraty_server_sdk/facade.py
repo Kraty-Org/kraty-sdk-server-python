@@ -10,13 +10,16 @@ from typing import TYPE_CHECKING
 
 from kraty_server_sdk.client import DEFAULT_BASE_URL, KratyAdminClient, RetryConfig
 from kraty_server_sdk.resources import (
+    ChatClient,
     EventsClient,
     GrantsClient,
+    GuildsClient,
     HealthClient,
     InventoryClient,
     LeaderboardsClient,
     LobbiesClient,
     MigrateClient,
+    ModerationClient,
     PlayersClient,
     WalletClient,
 )
@@ -68,6 +71,9 @@ class KratyServer:
         self.players = PlayersClient(self.client)
         self.health = HealthClient(self.client)
         self.migrate = MigrateClient(self.client)
+        self.guilds = GuildsClient(self.client)
+        self.chat = ChatClient(self.client)
+        self.moderation = ModerationClient(self.client)
 
     def close(self) -> None:
         """Release the underlying HTTP connection pool."""

@@ -42,22 +42,27 @@ from kraty_server_sdk.client import KratyAdminClient, RequestInfo, RetryConfig
 from kraty_server_sdk.errors import KratyNetworkError, KratyServerError
 from kraty_server_sdk.facade import KratyServer
 from kraty_server_sdk.resources import (
+    ChatClient,
     EventsClient,
     GrantsClient,
+    GuildsClient,
     HealthClient,
     InventoryClient,
     LeaderboardsClient,
     LobbiesClient,
+    ModerationClient,
     PlayersClient,
     WalletClient,
 )
 from kraty_server_sdk.webhook import verify_webhook
 
-__version__ = "0.17.2"
+__version__ = "0.17.3"
 
 __all__ = [
+    "ChatClient",
     "EventsClient",
     "GrantsClient",
+    "GuildsClient",
     "HealthClient",
     "InventoryClient",
     "KratyServer",
@@ -66,6 +71,7 @@ __all__ = [
     "KratyServerError",
     "LeaderboardsClient",
     "LobbiesClient",
+    "ModerationClient",
     "PlayersClient",
     "RequestInfo",
     "RetryConfig",
