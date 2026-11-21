@@ -1,0 +1,399 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-flutter/lib/src/errors.dart</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-flutter/lib/src/errors.dart</h1><p class=muted>kraty-sdk-flutter/lib/src/errors.dart</p><pre><code class="language-dart">import 'types.dart' show ChatMessage;
+
+/// Sealed-ish set of error codes the backend returns. Mirrors
+/// `api/errors.ts` on the backend side. Kept as constants (not an
+/// enum) so the SDK survives the platform adding a new code without
+/// a SDK release; consumers compare on strings, with the constants
+/// below as the canonical names.
+abstract class KratyErrorCode {
+  KratyErrorCode._();
+
+  // ── core ─────────────────────────────────────────────────────────
+  static const String unauthenticated = 'unauthenticated';
+  static const String sessionInvalid = 'session_invalid';
+  static const String forbidden = 'forbidden';
+  static const String notFound = 'not_found';
+  static const String validationFailed = 'validation_failed';
+  static const String conflict = 'conflict';
+  static const String rateLimited = 'rate_limited';
+  static const String internalError = 'internal_error';
+  static const String tenantMismatch = 'tenant_mismatch';
+  static const String idempotencyConflict = 'idempotency_conflict';
+
+  // ── per-player auth ──────────────────────────────────────────────
+  static const String playerSecretInvalid = 'player_secret_invalid';
+  static const String playerAlreadyRegistered = 'player_already_registered';
+
+  // ── events / attempts ────────────────────────────────────────────
+  static const String eventDisabled = 'event_disabled';
+  static const String noActiveWindow = 'no_active_window';
+  static const String noLeaderboard = 'no_leaderboard';
+  static const String maxAttemptsReached = 'max_attempts_reached';
+  static const String maxDailyAttemptsReached = 'max_daily_attempts_reached';
+  static const String attemptFinished = 'attempt_finished';
+  static const String invalidMetric = 'invalid_metric';
+  static const String unlockConditionFailed = 'unlock_condition_failed';
+  static const String invalidUnlockCondition = 'invalid_unlock_condition';
+
+  // ── entry requirements / cost ────────────────────────────────────
+  static const String entryRequirementFailed = 'entry_requirement_failed';
+  static const String invalidEntryRequirement = 'invalid_entry_requirement';
+  static const String insufficientEntryCost = 'insufficient_entry_cost';
+
+  // ── matchmaking ──────────────────────────────────────────────────
+  static const String lobbyForming = 'lobby_forming';
+
+  // ── inventory ────────────────────────────────────────────────────
+  static const String inventoryNotPermissive = 'inventory_not_permissive';
+
+  // ── chat (docs/26) ───────────────────────────────────────────────
+  static const String chatDisabled = 'chat_disabled';
+  static const String chatKindDisabled = 'chat_kind_disabled';
+  static const String chatMuted = 'chat_muted';
+  static const String chatBanned = 'chat_banned';
+  static const String chatNewPlayer = 'chat_new_player';
+  static const String playerBanned = 'player_banned';
+  static const String playerBlocked = 'player_blocked';
+  static const String chatDirectNotAllowed = 'chat_direct_not_allowed';
+  static const String chatPostNotAllowed = 'chat_post_not_allowed';
+  static const String chatRequirementNotMet = 'chat_requirement_not_met';
+  static const String chatPermissionDenied = 'chat_permission_denied';
+  static const String chatGroupFull = 'chat_group_full';
+  static const String chatGroupLimit = 'chat_group_limit';
+  static const String chatCannotTargetSelf = 'chat_cannot_target_self';
+  static const String chatMessageInvalid = 'chat_message_invalid';
+  static const String chatMessageRejected = 'chat_message_rejected';
+  static const String chatRateLimited = 'chat_rate_limited';
+  static const String chatSlowMode = 'chat_slow_mode';
+  static const String chatDuplicateMessage = 'chat_duplicate_message';
+  static const String chatEditNotAllowed = 'chat_edit_not_allowed';
+
+  // ── moderation ───────────────────────────────────────────────────
+  static const String cannotReportSelf = 'cannot_report_self';
+  static const String reportLimitReached = 'report_limit_reached';
+
+  // ── elastic scaling ──────────────────────────────────────────────
+  static const String serviceUnavailable = 'service_unavailable';
+}
+
+/// Backend error envelope: every non-2xx response (and the special
+/// 202 lobby-forming response) carries this shape.
+class KratyErrorPayload {
+  final String code;
+  final String message;
+  final Object? details;
+
+  const KratyErrorPayload({
+    required this.code,
+    required this.message,
+    this.details,
+  });
+}
+
+/// Thrown for every non-2xx response (and the 202 lobby-forming
+/// case). [status] is the HTTP status, [code] + [message] come from
+/// the backend's `{ error: { code, message, details? } }` envelope.
+///
+/// Use the typed `is...` getters to switch on a code; they're cheaper
+/// to read than a chain of string comparisons and immune to typos.
+/// One getter exists per code in [KratyErrorCode]; if you need to
+/// match a code the SDK hasn't bumped to yet, use [is].
+class KratyApiError implements Exception {
+  final int status;
+  final String code;
+  final String message;
+  final Object? details;
+
+  /// The response's `Retry-After` header in seconds, when it sent one.
+  final double? retryAfterHeaderSeconds;
+
+  const KratyApiError({
+    required this.status,
+    required this.code,
+    required this.message,
+    this.details,
+    this.retryAfterHeaderSeconds,
+  });
+
+  /// Generic code matcher. Useful when matching on a code the SDK
+  /// doesn't yet have a typed getter for (e.g. a code the backend
+  /// added before an SDK release).
+  ///
+  /// ```dart
+  /// if (err.is('event_disabled')) showEventDisabledDialog();
+  /// ```
+  // Renamed to avoid the `is` keyword collision.
+  bool isCode(String c) =&gt; code == c;
+
+  // ── core ─────────────────────────────────────────────────────────
+
+  /// 401: `Authorization` header missing on a protected route.
+  bool get isUnauthenticated =&gt; code == KratyErrorCode.unauthenticated;
+
+  /// 401: Bearer token is malformed, revoked, or rejected.
+  bool get isSessionInvalid =&gt; code == KratyErrorCode.sessionInvalid;
+
+  /// 403: authenticated but lacks the permission for this route.
+  bool get isForbidden =&gt; code == KratyErrorCode.forbidden;
+
+  /// 404: referenced resource doesn't exist or is archived.
+  bool get isNotFound =&gt; code == KratyErrorCode.notFound;
+
+  /// 400: request body / query failed schema validation. `details`
+  /// carries the field-level errors.
+  bool get isValidationFailed =&gt; code == KratyErrorCode.validationFailed;
+
+  /// 409: generic mutation conflict. More specific 409 codes get
+  /// their own getters; this catches the rest.
+  bool get isConflict =&gt; code == KratyErrorCode.conflict;
+
+  /// 429: per-key rate limit exceeded. The SDK auto-retries with
+  /// backoff before surfacing this.
+  bool get isRateLimited =&gt; code == KratyErrorCode.rateLimited;
+
+  /// 500: unhandled exception. Surface a generic "something went
+  /// wrong" to the player.
+  bool get isInternalError =&gt; code == KratyErrorCode.internalError;
+
+  /// 403: cross-studio access attempt. Shouldn't happen via the SDK.
+  bool get isTenantMismatch =&gt; code == KratyErrorCode.tenantMismatch;
+
+  /// 409: same `idempotencyKey` used with a different request body
+  /// within the 24h cache TTL. The SDK auto-stamps fresh keys per
+  /// write so you only see this when you've supplied your own key.
+  bool get isIdempotencyConflict =&gt;
+      code == KratyErrorCode.idempotencyConflict;
+
+  // ── per-player auth ──────────────────────────────────────────────
+
+  /// 401: `X-Player-Secret` is missing, malformed, or doesn't match
+  /// the stored hash. Triggers your re-authentication flow.
+  bool get isPlayerSecretInvalid =&gt;
+      code == KratyErrorCode.playerSecretInvalid;
+
+  /// 409: `register()` was called for a player who already has a
+  /// secret. In dev/test, retry with `force: true`. In production,
+  /// route to your account-recovery flow.
+  bool get isPlayerAlreadyRegistered =&gt;
+      code == KratyErrorCode.playerAlreadyRegistered;
+
+  // ── events / attempts ────────────────────────────────────────────
+
+  /// 409: the event is configured but disabled.
+  bool get isEventDisabled =&gt; code == KratyErrorCode.eventDisabled;
+
+  /// 409: the event has no currently-active window.
+  bool get isNoActiveWindow =&gt; code == KratyErrorCode.noActiveWindow;
+
+  /// 503: server couldn't allocate / find the leaderboard. Usually
+  /// transient, so retry after backoff.
+  bool get isNoLeaderboard =&gt; code == KratyErrorCode.noLeaderboard;
+
+  /// 429: player burned all attempts for the current event window.
+  bool get isMaxAttemptsReached =&gt;
+      code == KratyErrorCode.maxAttemptsReached;
+
+  /// 429: per-day attempt cap reached. Player should wait until
+  /// midnight in the event's timezone.
+  bool get isMaxDailyAttemptsReached =&gt;
+      code == KratyErrorCode.maxDailyAttemptsReached;
+
+  /// 409: reported progress on an attempt that's already
+  /// `completed` / `expired`. Refresh state.
+  bool get isAttemptFinished =&gt; code == KratyErrorCode.attemptFinished;
+
+  /// 400: `progress` referenced a metric key the event doesn't
+  /// declare. SDK / game-config bug.
+  bool get isInvalidMetric =&gt; code == KratyErrorCode.invalidMetric;
+
+  /// 403: player can't see the event yet (visibility gate failed).
+  bool get isUnlockConditionFailed =&gt;
+      code == KratyErrorCode.unlockConditionFailed;
+
+  /// 500: event config has a malformed unlock condition tree.
+  /// Operator should fix in the portal.
+  bool get isInvalidUnlockCondition =&gt;
+      code == KratyErrorCode.invalidUnlockCondition;
+
+  // ── entry requirements / cost ────────────────────────────────────
+
+  /// 403: player attempted an event whose entry requirement failed
+  /// (e.g. "must own item X"). Distinct from
+  /// [isInsufficientEntryCost]: requirements are binary ownership
+  /// checks, costs are transactional debits.
+  bool get isEntryRequirementFailed =&gt;
+      code == KratyErrorCode.entryRequirementFailed;
+
+  /// 500: event config has a malformed entry requirement.
+  bool get isInvalidEntryRequirement =&gt;
+      code == KratyErrorCode.invalidEntryRequirement;
+
+  /// 402: paid event start failed because the player couldn't
+  /// cover the event's `entryCost`. The message carries the exact
+  /// resource the player ran out of ("not enough cash to enter,
+  /// need 50"). The server's atomic debit was rolled back, so partial
+  /// spends never persist.
+  bool get isInsufficientEntryCost =&gt;
+      code == KratyErrorCode.insufficientEntryCost;
+
+  // ── matchmaking ──────────────────────────────────────────────────
+
+  /// 202: lobby-matched event whose lobby isn't yet at capacity.
+  /// Not a hard failure: poll the lobby endpoint (using
+  /// `details['lobbyId']`) and retry `events.start` once it
+  /// transitions out of `forming`.
+  bool get isLobbyForming =&gt; code == KratyErrorCode.lobbyForming;
+
+  /// 403: a client-side `grants.grant` on a game whose inventory management
+  /// isn't `permissive`. Enable it in the game's Settings, or grant from your
+  /// backend with a `server_integration` key.
+  bool get isInventoryNotPermissive =&gt;
+      code == KratyErrorCode.inventoryNotPermissive;
+
+  /// 403: the studio doesn't hold the chat add-on, or the game's chat
+  /// config doesn't serve this environment. Hide the chat UI.
+  bool get isChatDisabled =&gt; code == KratyErrorCode.chatDisabled;
+
+  /// 403: the player is muted (`details` carries the restriction). They can
+  /// read but not post until it lapses.
+  bool get isChatMuted =&gt; code == KratyErrorCode.chatMuted;
+
+  /// 403: the player is banned from chat.
+  bool get isChatBanned =&gt; code == KratyErrorCode.chatBanned;
+
+  /// 403: the message isn't the player's own, or the game's edit window
+  /// (`ChatClientConfig.editWindowSeconds`) has passed or is 0.
+  bool get isChatEditNotAllowed =&gt; code == KratyErrorCode.chatEditNotAllowed;
+
+  /// 429: any chat anti-spam refusal: too many messages
+  /// (`chat_rate_limited`), the conversation's cooldown (`chat_slow_mode`)
+  /// or the same text again (`chat_duplicate_message`). [retryAfterSeconds]
+  /// says when to try again. Sends and edits are never auto-retried on
+  /// these: every refusal is a spam strike, and repeated ones mute the
+  /// player automatically ([isChatMuted]).
+  bool get isChatRateLimited =&gt;
+      code == KratyErrorCode.chatRateLimited ||
+      code == KratyErrorCode.chatSlowMode ||
+      code == KratyErrorCode.chatDuplicateMessage;
+
+  /// 429: sent again before the conversation's cooldown passed
+  /// (`details['cooldownSeconds']` is the cooldown).
+  bool get isChatSlowMode =&gt; code == KratyErrorCode.chatSlowMode;
+
+  /// 429: the same text again in this conversation within the game's
+  /// duplicate window.
+  bool get isChatDuplicateMessage =&gt; code == KratyErrorCode.chatDuplicateMessage;
+
+  /// 503: the server is busy (scaling up, or shedding load) and refused
+  /// the request before doing anything. Always safe to retry after
+  /// [retryAfterSeconds]. Chat sends, edits and the SDK's live streams
+  /// already do that on their own, so a game rarely sees this.
+  bool get isServiceUnavailable =&gt; code == KratyErrorCode.serviceUnavailable;
+
+  /// Seconds to wait before trying again (`details['retryAfterSeconds']`,
+  /// on the chat 429s and the busy 503, else the `Retry-After` header),
+  /// rounded up, or null when the error carries none.
+  int? get retryAfterSeconds =&gt; retryAfter == null ? null : (retryAfter!.inMilliseconds / 1000).ceil();
+
+  /// [retryAfterSeconds] as an exact [Duration], or null when the error
+  /// carries none.
+  Duration? get retryAfter {
+    final d = details;
+    double? seconds;
+    if (d is Map) {
+      final v = d['retryAfterSeconds'];
+      if (v is num) seconds = v.toDouble();
+    }
+    seconds ??= retryAfterHeaderSeconds;
+    if (seconds == null || seconds &lt; 0) return null;
+    return Duration(milliseconds: (seconds * 1000).round());
+  }
+
+  @override
+  String toString() =&gt; 'KratyApiError [$status] $code: $message';
+}
+
+/// Network / HTTP-layer failure that didn't produce an HTTP response
+/// (DNS, socket reset, timeout, etc.).
+class KratyNetworkError implements Exception {
+  final String message;
+  final Object? originalCause;
+
+  const KratyNetworkError(this.message, [this.originalCause]);
+
+  @override
+  String toString() =&gt; 'KratyNetworkError: $message';
+}
+
+/// A chat message (or edit) the SDK could not deliver within
+/// [KratyClientOptions.chatOutboxTimeout] (default 120 s): the network was
+/// down or the servers stayed busy the whole time. Never a refusal (those
+/// throw [KratyApiError]), so nothing was posted and no spam strike was
+/// counted.
+///
+/// Show the message as "not sent, tap to retry" and call [retry] on the
+/// tap: it goes back through the outbox with the SAME [clientMessageId], so
+/// even if an earlier try did reach the server it is never posted twice.
+/// (Calling `chat.send` again passing `clientMessageId:` does the same.)
+/// Extends [KratyNetworkError], so existing network-error handling still
+/// catches it.
+class KratyChatNotSentError extends KratyNetworkError {
+  /// The conversation the message was for.
+  final String conversationId;
+
+  /// The id the message was sent with; null for an edit.
+  final String? clientMessageId;
+
+  /// The last failure seen: a [KratyNetworkError], or a 5xx [KratyApiError].
+  final Object? lastError;
+
+  final Future&lt;ChatMessage&gt; Function() _resend;
+
+  KratyChatNotSentError(
+    String message, {
+    required this.conversationId,
+    required this.clientMessageId,
+    required this.lastError,
+    required Future&lt;ChatMessage&gt; Function() resend,
+  })  : _resend = resend,
+        super(message, lastError);
+
+  /// Sends it again through the outbox (same [clientMessageId]; for an
+  /// edit, the same edit). Completes with the message, or throws like the
+  /// original call.
+  Future&lt;ChatMessage&gt; retry() =&gt; _resend();
+
+  @override
+  String toString() =&gt; 'KratyChatNotSentError: $message';
+}
+
+/// When a failed request may be retried as-is: a network error or
+/// timeout, a 408, a 429 when [include429] is true, or any 5xx.
+bool isTransientKratyError(Object err, {bool include429 = false}) {
+  if (err is KratyChatNotSentError) return false;
+  if (err is KratyNetworkError) return true;
+  if (err is KratyApiError) {
+    return err.status &gt;= 500 || err.status == 408 || (include429 &amp;&amp; err.status == 429);
+  }
+  return false;
+}
+
+/// Parses a `Retry-After` header given in seconds (the HTTP-date form is
+/// ignored).
+double? parseRetryAfterHeader(String? value) {
+  if (value == null) return null;
+  final n = double.tryParse(value.trim());
+  return n != null &amp;&amp; n &gt;= 0 ? n : null;
+}
+
+extension KratyApiErrorIs on Object? {
+  /// Helper: `if (err.isLobbyFormingException) { ... }`; true iff
+  /// this is a `KratyApiError` with `code == 'lobby_forming'`.
+  bool get isLobbyFormingException {
+    final self = this;
+    return self is KratyApiError &amp;&amp; self.isLobbyForming;
+  }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

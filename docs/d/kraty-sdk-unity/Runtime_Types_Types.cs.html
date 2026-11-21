@@ -1,0 +1,2693 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-unity/Runtime/Types/Types.cs</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-unity/Runtime/Types/Types.cs</h1><p class=muted>kraty-sdk-unity/Runtime/Types/Types.cs</p><pre><code class="language-csharp">using System.Collections.Generic;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+
+namespace Kraty
+{
+    /// &lt;summary&gt;
+    /// Public response types for the &lt;c&gt;/sdk/v1&lt;/c&gt; surface, mirroring
+    /// the OpenAPI spec at &lt;c&gt;apps/backend/openapi.json&lt;/c&gt;. Plain DTOs;
+    /// Newtonsoft.Json deserializes into them via the
+    /// &lt;see cref="JsonPropertyAttribute"/&gt; hints.
+    ///
+    /// LocalizedString-ish fields (&lt;c&gt;name&lt;/c&gt;, &lt;c&gt;description&lt;/c&gt;) and
+    /// free-form metadata bags are typed as &lt;c&gt;JToken&lt;/c&gt; /
+    /// &lt;c&gt;Dictionary&amp;lt;string, JToken&amp;gt;&lt;/c&gt; so the consumer can
+    /// inspect the shape without the SDK locking it down prematurely.
+    /// &lt;/summary&gt;
+
+    public sealed class Attempt
+    {
+        [JsonProperty("id")] public string Id { get; set; } = string.Empty;
+        [JsonProperty("eventId")] public string EventId { get; set; } = string.Empty;
+        [JsonProperty("eventWindowId")] public string EventWindowId { get; set; } = string.Empty;
+        [JsonProperty("leaderboardId")] public string LeaderboardId { get; set; } = string.Empty;
+        [JsonProperty("playerId")] public string PlayerId { get; set; } = string.Empty;
+        [JsonProperty("startedAt")] public string StartedAt { get; set; } = string.Empty;
+        [JsonProperty("endsAt")] public string EndsAt { get; set; } = string.Empty;
+        [JsonProperty("completedAt")] public string? CompletedAt { get; set; }
+        [JsonProperty("metrics")] public Dictionary&lt;string, double&gt; Metrics { get; set; } = new();
+        [JsonProperty("metricsRaw")] public Dictionary&lt;string, double&gt; MetricsRaw { get; set; } = new();
+        [JsonProperty("score")] public double Score { get; set; }
+        /// &lt;summary&gt;One of &lt;c&gt;in_progress&lt;/c&gt;, &lt;c&gt;completed&lt;/c&gt;, &lt;c&gt;expired&lt;/c&gt;, &lt;c&gt;force_completed&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = string.Empty;
+    }
+
+    public sealed class StartAttemptResponse
+    {
+        [JsonProperty("attempt")] public Attempt Attempt { get; set; } = new();
+        [JsonProperty("leaderboardId")] public string LeaderboardId { get; set; } = string.Empty;
+        [JsonProperty("windowEndsAt")] public string WindowEndsAt { get; set; } = string.Empty;
+        /// &lt;summary&gt;Team events only: the player's team seats in this window. Null otherwise.&lt;/summary&gt;
+        [JsonProperty("teams")] public List&lt;TeamSeatView&gt;? Teams { get; set; }
+    }
+
+    public sealed class ProgressResult
+    {
+        [JsonProperty("attempt")] public Attempt Attempt { get; set; } = new();
+        /// &lt;summary&gt;Team events only: the player's team seats after this write. Null otherwise.&lt;/summary&gt;
+        [JsonProperty("teams")] public List&lt;TeamSeatView&gt;? Teams { get; set; }
+
+        /// &lt;summary&gt;
+        /// Milestones whose threshold was crossed by THIS progress
+        /// call. Always present (empty list when nothing fired) and never
+        /// null, so callers can iterate without a null check. Each
+        /// entry's &lt;c&gt;Grants&lt;/c&gt; array carries the concrete payout
+        /// rows in the same shape &lt;c&gt;GET /grants/pending&lt;/c&gt; returns.
+        /// &lt;/summary&gt;
+        [JsonProperty("milestonesFired")] public List&lt;MilestoneFired&gt; MilestonesFired { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// Result of &lt;c&gt;Events.FinishAsync&lt;/c&gt;: the finalized attempt plus how
+    /// it resolved: "completed" (a score-attack end, or a target that was
+    /// already met → completion rewards) or "expired" (a target event ended
+    /// before its target, participation only).
+    /// &lt;/summary&gt;
+    public sealed class FinishAttemptResult
+    {
+        [JsonProperty("attempt")] public Attempt Attempt { get; set; } = new();
+
+        [JsonProperty("outcome")] public string Outcome { get; set; } = "completed";
+        /// &lt;summary&gt;Team events only: the player's team seats. Null otherwise.&lt;/summary&gt;
+        [JsonProperty("teams")] public List&lt;TeamSeatView&gt;? Teams { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// A single milestone that fired during a &lt;see cref="EventsClient.ProgressAsync"/&gt;
+    /// call. The &lt;c&gt;Key&lt;/c&gt; is the designer-assigned id (use it to look
+    /// up icon/copy/animation in your asset bundle). &lt;c&gt;Grants&lt;/c&gt; is the
+    /// concrete reward rows the engine wrote; render those directly or
+    /// hand them to your existing grant-handling code.
+    /// &lt;/summary&gt;
+    public sealed class MilestoneFired
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("grants")] public List&lt;Grant&gt; Grants { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// One slot in an event's &lt;c&gt;entryCost.currencies&lt;/c&gt; list, paid
+    /// from the player's wallet on attempt start.
+    /// &lt;/summary&gt;
+    public sealed class EntryCostCurrency
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("amount")] public int Amount { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// One slot in an event's &lt;c&gt;entryCost.items&lt;/c&gt; list, consumed
+    /// from inventory on attempt start.
+    /// &lt;/summary&gt;
+    public sealed class EntryCostItem
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("quantity")] public int Quantity { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Transactional cost paid on &lt;see cref="EventsClient.StartAsync"/&gt;.
+    /// Server atomically debits + creates the attempt in a single tx, so
+    /// partial debits never persist. Missing entry triggers a
+    /// &lt;see cref="KratyApiError"/&gt; with code
+    /// &lt;c&gt;insufficient_entry_cost&lt;/c&gt;.
+    /// &lt;/summary&gt;
+    public sealed class EntryCost
+    {
+        [JsonProperty("currencies")] public List&lt;EntryCostCurrency&gt; Currencies { get; set; } = new();
+        [JsonProperty("items")] public List&lt;EntryCostItem&gt; Items { get; set; } = new();
+
+        [JsonIgnore]
+        public bool IsEmpty =&gt; (Currencies?.Count ?? 0) == 0 &amp;&amp; (Items?.Count ?? 0) == 0;
+    }
+
+    /// &lt;summary&gt;
+    /// One slot inside a reward bundle or milestone reward payload.
+    /// Carries one of three shapes discriminated by &lt;see cref="Type"/&gt;:
+    /// &lt;c&gt;currency&lt;/c&gt;, &lt;c&gt;item&lt;/c&gt;, or &lt;c&gt;crate&lt;/c&gt;. Optional fields
+    /// match whichever shape applies.
+    /// &lt;/summary&gt;
+    public sealed class RewardEntryPreview
+    {
+        /// &lt;summary&gt;One of &lt;c&gt;currency&lt;/c&gt; / &lt;c&gt;item&lt;/c&gt; / &lt;c&gt;crate&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("type")] public string Type { get; set; } = string.Empty;
+        /// &lt;summary&gt;Set when &lt;see cref="Type"/&gt; is &lt;c&gt;currency&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("currencyKey")] public string? CurrencyKey { get; set; }
+        /// &lt;summary&gt;Set when &lt;see cref="Type"/&gt; is &lt;c&gt;currency&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("amount")] public double? Amount { get; set; }
+        /// &lt;summary&gt;Set when &lt;see cref="Type"/&gt; is &lt;c&gt;item&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("itemKey")] public string? ItemKey { get; set; }
+        /// &lt;summary&gt;Set when &lt;see cref="Type"/&gt; is &lt;c&gt;crate&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("crateItemKey")] public string? CrateItemKey { get; set; }
+        /// &lt;summary&gt;Set when &lt;see cref="Type"/&gt; is &lt;c&gt;item&lt;/c&gt; or &lt;c&gt;crate&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("quantity")] public int? Quantity { get; set; }
+        /// &lt;summary&gt;Optional per-item parameters (used by &lt;c&gt;item&lt;/c&gt; entries).&lt;/summary&gt;
+        [JsonProperty("parameters")] public Dictionary&lt;string, JToken&gt;? Parameters { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Inline preview of a reward bundle's contents. Surfaced on
+    /// &lt;see cref="EventListing.RewardPolicy"/&gt; so the studio can
+    /// render "you'll win X" without resolving bundle IDs against a
+    /// separate endpoint.
+    /// &lt;/summary&gt;
+    public sealed class RewardBundlePreview
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        /// &lt;summary&gt;LocalizedString.&lt;/summary&gt;
+        [JsonProperty("name")] public JToken? Name { get; set; }
+        [JsonProperty("entries")] public List&lt;RewardEntryPreview&gt; Entries { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// One milestone reward that fires when the player crosses
+    /// &lt;see cref="Threshold"/&gt; on &lt;see cref="MetricKey"/&gt; during a
+    /// single attempt. Use this to render "next milestone: 5 rabbits
+    /// → 200 cash + 5 bullets" in your UI.
+    /// &lt;/summary&gt;
+    public sealed class MilestoneRewardPreview
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("metricKey")] public string MetricKey { get; set; } = string.Empty;
+        [JsonProperty("threshold")] public double Threshold { get; set; }
+        [JsonProperty("entries")] public List&lt;RewardEntryPreview&gt; Entries { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;One tier in a &lt;c&gt;rank_scaled&lt;/c&gt; reward policy.&lt;/summary&gt;
+    public sealed class RewardPolicyTier
+    {
+        [JsonProperty("fromRank")] public int FromRank { get; set; }
+        [JsonProperty("toRank")] public int ToRank { get; set; }
+        [JsonProperty("bundle")] public RewardBundlePreview? Bundle { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Reward policy summary with inline bundle previews. Mirrors the
+    /// four sealed policy types the backend supports:
+    /// &lt;list type="bullet"&gt;
+    ///   &lt;item&gt;&lt;description&gt;&lt;c&gt;none&lt;/c&gt;: event has no rewards.&lt;/description&gt;&lt;/item&gt;
+    ///   &lt;item&gt;&lt;description&gt;&lt;c&gt;fixed_bundle&lt;/c&gt;: everyone who completes gets &lt;see cref="Bundle"/&gt;.&lt;/description&gt;&lt;/item&gt;
+    ///   &lt;item&gt;&lt;description&gt;&lt;c&gt;rank_scaled&lt;/c&gt;: bundle picked by leaderboard rank; see &lt;see cref="Tiers"/&gt;.&lt;/description&gt;&lt;/item&gt;
+    ///   &lt;item&gt;&lt;description&gt;&lt;c&gt;shared_pool&lt;/c&gt;: currency pool split among winners; see &lt;see cref="Pool"/&gt; and &lt;see cref="CurrencyKey"/&gt;.&lt;/description&gt;&lt;/item&gt;
+    /// &lt;/list&gt;
+    /// &lt;/summary&gt;
+    public sealed class RewardPolicySummary
+    {
+        [JsonProperty("type")] public string Type { get; set; } = "none";
+        /// &lt;summary&gt;Set when &lt;see cref="Type"/&gt; is &lt;c&gt;fixed_bundle&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("bundle")] public RewardBundlePreview? Bundle { get; set; }
+        /// &lt;summary&gt;Set when &lt;see cref="Type"/&gt; is &lt;c&gt;rank_scaled&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("tiers")] public List&lt;RewardPolicyTier&gt;? Tiers { get; set; }
+        /// &lt;summary&gt;Set when &lt;see cref="Type"/&gt; is &lt;c&gt;shared_pool&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("pool")] public double? Pool { get; set; }
+        /// &lt;summary&gt;Set when &lt;see cref="Type"/&gt; is &lt;c&gt;shared_pool&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("currencyKey")] public string? CurrencyKey { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// How much of the player's attempt allowance on this event window is
+    /// spent, for an entry counter ("Play — 1/2 today").
+    /// &lt;para&gt;
+    /// The &lt;c&gt;Used*&lt;/c&gt; counts include a live attempt: an entry is spent
+    /// when it starts, not when it finishes. A counter is only populated
+    /// when the matching cap is set — an uncapped event reports &lt;c&gt;0&lt;/c&gt;
+    /// used and a &lt;c&gt;null&lt;/c&gt; maximum. &lt;see cref="Remaining"/&gt; is the
+    /// tightest configured cap, &lt;c&gt;null&lt;/c&gt; when nothing is capped.
+    /// &lt;/para&gt;
+    /// &lt;/summary&gt;
+    public sealed class AttemptQuota
+    {
+        /// &lt;summary&gt;Attempts allowed for the whole window; null = unlimited.&lt;/summary&gt;
+        [JsonProperty("maxPerWindow")] public int? MaxPerWindow { get; set; }
+        [JsonProperty("usedInWindow")] public int UsedInWindow { get; set; }
+        /// &lt;summary&gt;Attempts allowed per local calendar day; null = unlimited.&lt;/summary&gt;
+        [JsonProperty("maxPerDay")] public int? MaxPerDay { get; set; }
+        [JsonProperty("usedToday")] public int UsedToday { get; set; }
+        /// &lt;summary&gt;What the player can still start now; null = unlimited.&lt;/summary&gt;
+        [JsonProperty("remaining")] public int? Remaining { get; set; }
+
+        /// &lt;summary&gt;
+        /// True when a cap is configured and fully spent, so the next
+        /// &lt;c&gt;StartAsync&lt;/c&gt; would be refused. Drives a greyed-out Play button.
+        /// &lt;/summary&gt;
+        [JsonIgnore]
+        public bool IsExhausted =&gt; Remaining == 0;
+    }
+
+    public sealed class EventListing
+    {
+        [JsonProperty("eventKey")] public string EventKey { get; set; } = string.Empty;
+        /// &lt;summary&gt;
+        /// LocalizedString (string or object); see backend docs/02 § English-only v1.
+        /// Kept as &lt;see cref="JToken"/&gt; so the consumer can
+        /// inspect the shape without the SDK locking it down prematurely.
+        /// &lt;/summary&gt;
+        [JsonProperty("name")] public JToken? Name { get; set; }
+        [JsonProperty("windowId")] public string WindowId { get; set; } = string.Empty;
+        [JsonProperty("startsAt")] public string StartsAt { get; set; } = string.Empty;
+        [JsonProperty("endsAt")] public string EndsAt { get; set; } = string.Empty;
+        [JsonProperty("leaderboardId")] public string? LeaderboardId { get; set; }
+        [JsonProperty("currentAttemptId")] public string? CurrentAttemptId { get; set; }
+
+        /// &lt;summary&gt;
+        /// &lt;c&gt;single_metric&lt;/c&gt; / &lt;c&gt;multi_metric&lt;/c&gt; (and any future
+        /// event-type registry entries). Lets the SDK consumer pick
+        /// the right UI without a hard-coded per-event catalog.
+        /// &lt;/summary&gt;
+        [JsonProperty("type")] public string Type { get; set; } = "single_metric";
+
+        /// &lt;summary&gt;
+        /// &lt;c&gt;global&lt;/c&gt; / &lt;c&gt;global_segmented&lt;/c&gt; / &lt;c&gt;grouped&lt;/c&gt; /
+        /// &lt;c&gt;lobby_matched&lt;/c&gt;. Combined with &lt;see cref="LeaderboardId"/&gt;
+        /// tells the consumer whether to expect &lt;c&gt;lobby_forming&lt;/c&gt;
+        /// on &lt;see cref="EventsClient.StartAsync"/&gt;.
+        /// &lt;/summary&gt;
+        [JsonProperty("leaderboardMode")] public string LeaderboardMode { get; set; } = "global";
+
+        /// &lt;summary&gt;
+        /// Free-form metric definitions from the event row (key,
+        /// target, cap, scoreWeight, …); same shape the server stores.
+        /// &lt;/summary&gt;
+        [JsonProperty("metrics")] public List&lt;Dictionary&lt;string, JToken&gt;&gt; Metrics { get; set; } = new();
+
+        /// &lt;summary&gt;Player-condition tree; null when there's no join gate.&lt;/summary&gt;
+        [JsonProperty("entryRequirement")] public Dictionary&lt;string, JToken&gt;? EntryRequirement { get; set; }
+
+        /// &lt;summary&gt;
+        /// Cost paid on attempt start. &lt;c&gt;null&lt;/c&gt; (and an empty
+        /// &lt;see cref="EntryCost"/&gt;) both mean "free to enter".
+        /// &lt;/summary&gt;
+        [JsonProperty("entryCost")] public EntryCost? EntryCost { get; set; }
+
+        /// &lt;summary&gt;
+        /// Studio-defined free-form blob. Event-level metadata merged
+        /// with the active window's metadata (window keys win). Use
+        /// for UI hints: banner image keys, theme colors,
+        /// special-event copy.
+        /// &lt;/summary&gt;
+        [JsonProperty("metadata")] public Dictionary&lt;string, JToken&gt; Metadata { get; set; } = new();
+
+        /// &lt;summary&gt;Mid-attempt milestone rewards. Empty list when none configured.&lt;/summary&gt;
+        [JsonProperty("milestoneRewards")] public List&lt;MilestoneRewardPreview&gt; MilestoneRewards { get; set; } = new();
+
+        /// &lt;summary&gt;Reward policy summary with inline bundle previews.&lt;/summary&gt;
+        [JsonProperty("rewardPolicy")] public RewardPolicySummary? RewardPolicy { get; set; }
+
+        /// &lt;summary&gt;
+        /// Attempts spent vs. allowed for this player. Null only on
+        /// backends older than the attempt-quota field; a modern backend
+        /// always sets it (null maxima when the event caps nothing).
+        /// &lt;/summary&gt;
+        [JsonProperty("attemptQuota")] public AttemptQuota? AttemptQuota { get; set; }
+
+        /// &lt;summary&gt;
+        /// Score that ends a &lt;c&gt;first_to_score&lt;/c&gt; session: the race's
+        /// finish line. Draw progress toward it; &lt;c&gt;null&lt;/c&gt; when the
+        /// event has no such target.
+        /// &lt;/summary&gt;
+        [JsonProperty("goal")] public int? Goal { get; set; }
+
+        /// &lt;summary&gt;
+        /// Player-condition tree that gates the event's visibility
+        /// (&lt;see cref="EntryRequirement"/&gt; gates joining). The server
+        /// enforces it on start; surfaced so the UI can show why an event
+        /// is locked. &lt;c&gt;null&lt;/c&gt; when there's no gate.
+        /// &lt;/summary&gt;
+        [JsonProperty("unlockCondition")] public Dictionary&lt;string, JToken&gt;? UnlockCondition { get; set; }
+
+        /// &lt;summary&gt;
+        /// Length of one attempt in seconds. It's also cut short by the
+        /// window end (&lt;see cref="EndsAt"/&gt;) and, for session events, by
+        /// the session ending. &lt;c&gt;null&lt;/c&gt; on backends older than the field.
+        /// &lt;/summary&gt;
+        [JsonProperty("attemptDurationSeconds")] public int? AttemptDurationSeconds { get; set; }
+
+        /// &lt;summary&gt;
+        /// Team events only: the player's team seats in this window (score,
+        /// goal / boss HP, milestones, your contribution and rank). Null for
+        /// non-team events; empty while the player has no team.
+        /// &lt;/summary&gt;
+        [JsonProperty("teams")] public List&lt;TeamSeatView&gt;? Teams { get; set; }
+
+        /// &lt;summary&gt;
+        /// Team events only: how teams form, i.e. what your UI does before
+        /// the player scores for a team. &lt;c&gt;external&lt;/c&gt; (your server posts
+        /// rosters) and &lt;c&gt;attribute&lt;/c&gt; (e.g. country) need nothing;
+        /// &lt;c&gt;auto_match&lt;/c&gt;: &lt;see cref="EventsClient.MatchTeamAsync"/&gt; (or just
+        /// start); &lt;c&gt;partner_slots&lt;/c&gt;: partner invites / random partner, then
+        /// pass &lt;see cref="ProgressInput.EventTeamId"/&gt;.
+        /// &lt;/summary&gt;
+        [JsonProperty("teamFormation")] public string? TeamFormation { get; set; }
+
+        /// &lt;summary&gt;
+        /// Team events only: the formation's player-facing options (partner
+        /// cap, random partners, team size, the context keys a country team
+        /// reads), so the UI offers the right setup before the player has a team.
+        /// &lt;/summary&gt;
+        [JsonProperty("teamOptions")] public TeamClientOptions? TeamOptions { get; set; }
+
+        /// &lt;summary&gt;
+        /// True when &lt;see cref="LeaderboardMode"/&gt; is &lt;c&gt;lobby_matched&lt;/c&gt;.
+        /// Convenience flag for switching into a lobby-waiting view.
+        /// &lt;/summary&gt;
+        [JsonIgnore]
+        public bool IsLobbyMatched =&gt; LeaderboardMode == "lobby_matched";
+    }
+
+    /// &lt;summary&gt;
+    /// One item row as exposed to game clients via the catalog
+    /// endpoint. Display-relevant fields only; internal config and
+    /// archival timestamps stay off the SDK wire format.
+    /// &lt;/summary&gt;
+    public sealed class CatalogItem
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        /// &lt;summary&gt;LocalizedString.&lt;/summary&gt;
+        [JsonProperty("name")] public JToken? Name { get; set; }
+        [JsonProperty("iconUrl")] public string? IconUrl { get; set; }
+        /// &lt;summary&gt;LocalizedString.&lt;/summary&gt;
+        [JsonProperty("description")] public JToken? Description { get; set; }
+        [JsonProperty("itemTypeKey")] public string ItemTypeKey { get; set; } = string.Empty;
+        [JsonProperty("tags")] public List&lt;string&gt; Tags { get; set; } = new();
+        [JsonProperty("rarity")] public string? Rarity { get; set; }
+        [JsonProperty("attributes")] public Dictionary&lt;string, JToken&gt; Attributes { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// One currency row as exposed to game clients. &lt;see cref="Kind"/&gt;
+    /// distinguishes spendable currencies (&lt;c&gt;currency&lt;/c&gt;) from
+    /// progression resources (&lt;c&gt;progression&lt;/c&gt;).
+    /// &lt;/summary&gt;
+    public sealed class CatalogCurrency
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        /// &lt;summary&gt;LocalizedString.&lt;/summary&gt;
+        [JsonProperty("name")] public JToken? Name { get; set; }
+        [JsonProperty("iconUrl")] public string? IconUrl { get; set; }
+        /// &lt;summary&gt;LocalizedString.&lt;/summary&gt;
+        [JsonProperty("description")] public JToken? Description { get; set; }
+        [JsonProperty("kind")] public string Kind { get; set; } = "currency";
+        /// &lt;summary&gt;A derived progression item's curve (&lt;c&gt;level&lt;/c&gt; from &lt;c&gt;xp&lt;/c&gt;); null otherwise.&lt;/summary&gt;
+        [JsonProperty("derived")] public CatalogDerivedProgression? Derived { get; set; }
+    }
+
+    /// &lt;summary&gt;Each level of a derived item and the source balance that reaches it, lowest first.&lt;/summary&gt;
+    public sealed class CatalogDerivedProgression
+    {
+        [JsonProperty("sourceKey")] public string SourceKey { get; set; } = string.Empty;
+        [JsonProperty("levels")] public List&lt;CatalogDerivedLevel&gt; Levels { get; set; } = new();
+    }
+
+    public sealed class CatalogDerivedLevel
+    {
+        [JsonProperty("level")] public int Level { get; set; }
+        [JsonProperty("sourceRequired")] public long SourceRequired { get; set; }
+    }
+
+    public sealed class Catalog
+    {
+        [JsonProperty("items")] public List&lt;CatalogItem&gt; Items { get; set; } = new();
+        [JsonProperty("currencies")] public List&lt;CatalogCurrency&gt; Currencies { get; set; } = new();
+    }
+
+    public sealed class LeaderboardEntry
+    {
+        [JsonProperty("participantId")] public string ParticipantId { get; set; } = string.Empty;
+        /// &lt;summary&gt;One of &lt;c&gt;player&lt;/c&gt;, &lt;c&gt;bot&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("kind")] public string Kind { get; set; } = string.Empty;
+        [JsonProperty("name")] public string? Name { get; set; }
+        [JsonProperty("avatar")] public string? Avatar { get; set; }
+
+        /// &lt;summary&gt;ISO-3166 alpha-2 country of the player (e.g. "PT") for a flag;
+        /// null for bots and when the server couldn't resolve it.&lt;/summary&gt;
+        [JsonProperty("country")] public string? Country { get; set; }
+        /// &lt;summary&gt;
+        /// Immutable anonymized display name for players (the synthetic-pool
+        /// value). &lt;see cref="Name"/&gt; holds the player's real display value
+        /// (from &lt;c&gt;SetIdentity&lt;/c&gt;) with a fallback to the pool value; this
+        /// field carries the pool value directly so games can render a
+        /// privacy-preserving view (public boards, cross-game aggregations)
+        /// without a second lookup. Null on bot entries and on rows that
+        /// predate the split feature.
+        /// &lt;/summary&gt;
+        [JsonProperty("anonymizedName")] public string? AnonymizedName { get; set; }
+        /// &lt;summary&gt;
+        /// Per-player progression balances requested via
+        /// &lt;c&gt;Progression&lt;/c&gt; on the read options, e.g.
+        /// &lt;c&gt;{ "level": 12 }&lt;/c&gt;. Null when none were requested; a resource
+        /// the player never earned reads &lt;c&gt;0&lt;/c&gt;. Never set on bot rows.
+        /// &lt;/summary&gt;
+        [JsonProperty("progression")] public Dictionary&lt;string, int&gt;? Progression { get; set; }
+        /// &lt;summary&gt;Matching avatar reference for &lt;see cref="AnonymizedName"/&gt;.&lt;/summary&gt;
+        [JsonProperty("anonymizedAvatar")] public string? AnonymizedAvatar { get; set; }
+        [JsonProperty("score")] public double Score { get; set; }
+        [JsonProperty("rank")] public int Rank { get; set; }
+        /// &lt;summary&gt;
+        /// &lt;c&gt;true&lt;/c&gt; when this entry is the player calling the API
+        /// (resolved from the &lt;c&gt;externalId&lt;/c&gt; passed via
+        /// &lt;c&gt;includeSelf&lt;/c&gt;). Highlight rows off this rather than
+        /// matching &lt;c&gt;ParticipantId&lt;/c&gt; to the external id yourself,
+        /// since the server surfaces the internal player UUID, not the
+        /// external one. Always &lt;c&gt;false&lt;/c&gt; on entries without a
+        /// self-context request, and on bot entries regardless.
+        /// &lt;/summary&gt;
+        [JsonProperty("isSelf")] public bool IsSelf { get; set; }
+        /// &lt;summary&gt;
+        /// Team boards only: the event team behind this row (rows are
+        /// &lt;c&gt;kind: player&lt;/c&gt;, rival bot teams &lt;c&gt;bot&lt;/c&gt; with a null team).
+        /// &lt;/summary&gt;
+        [JsonProperty("team")] public LeaderboardEntryTeam? Team { get; set; }
+    }
+
+    /// &lt;summary&gt;The event team behind a team-board row.&lt;/summary&gt;
+    public sealed class LeaderboardEntryTeam
+    {
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        [JsonProperty("badge")] public string? Badge { get; set; }
+        [JsonProperty("memberCount")] public int MemberCount { get; set; }
+    }
+
+    public sealed class LeaderboardSelf
+    {
+        [JsonProperty("rank")] public int Rank { get; set; }
+        [JsonProperty("score")] public double Score { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// One side of a promotion/relegation ladder: the &lt;c&gt;Places&lt;/c&gt; positions
+    /// (from the top for promotion, the bottom for relegation) that move, and
+    /// the progression &lt;c&gt;ItemKey&lt;/c&gt; they nudge.
+    /// &lt;/summary&gt;
+    public sealed class ProgressionBand
+    {
+        /// &lt;summary&gt;How many positions on this end move (e.g. top 3 promote).&lt;/summary&gt;
+        [JsonProperty("places")] public int Places { get; set; }
+        /// &lt;summary&gt;The progression item climbed / dropped.&lt;/summary&gt;
+        [JsonProperty("itemKey")] public string ItemKey { get; set; } = string.Empty;
+    }
+
+    /// &lt;summary&gt;
+    /// Promotion / relegation limits for the caller's division, resolved from
+    /// server config (a per-division override wins over the global ladder).
+    /// Render "top N promote / bottom N relegate" from this instead of
+    /// hardcoding the cutoffs. Each side is &lt;c&gt;null&lt;/c&gt; when no ladder runs on
+    /// that end.
+    /// &lt;/summary&gt;
+    public sealed class ProgressionLimits
+    {
+        [JsonProperty("promotion")] public ProgressionBand? Promotion { get; set; }
+        [JsonProperty("relegation")] public ProgressionBand? Relegation { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Response from &lt;see cref="LeaderboardsClient.ReadAsync"/&gt;: a
+    /// configurable, cross-event leaderboard addressed by its game-scoped
+    /// &lt;c&gt;key&lt;/c&gt; (e.g. &lt;c&gt;"weekly_global"&lt;/c&gt;). This is what most games
+    /// render; the auto-created per-event-window board is
+    /// &lt;see cref="EventLeaderboard"/&gt;.
+    /// &lt;/summary&gt;
+    public sealed class Leaderboard
+    {
+        /// &lt;summary&gt;The board's stable game-scoped key (e.g. &lt;c&gt;"weekly_global"&lt;/c&gt;).&lt;/summary&gt;
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        /// &lt;summary&gt;UUID of the leaderboard config row.&lt;/summary&gt;
+        [JsonProperty("leaderboardId")] public string LeaderboardId { get; set; } = string.Empty;
+        /// &lt;summary&gt;One of &lt;c&gt;global&lt;/c&gt;, &lt;c&gt;regional&lt;/c&gt;, etc.; set in the board's config.&lt;/summary&gt;
+        [JsonProperty("scope")] public string? Scope { get; set; }
+        /// &lt;summary&gt;One of &lt;c&gt;daily&lt;/c&gt;, &lt;c&gt;weekly&lt;/c&gt;, &lt;c&gt;monthly&lt;/c&gt;, &lt;c&gt;never&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("resetCadence")] public string? ResetCadence { get; set; }
+        /// &lt;summary&gt;How concurrent scores combine: &lt;c&gt;best&lt;/c&gt;, &lt;c&gt;sum&lt;/c&gt;, &lt;c&gt;last&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("scoreAggregation")] public string? ScoreAggregation { get; set; }
+        /// &lt;summary&gt;Resolved segment bucket for segmented boards; &lt;c&gt;null&lt;/c&gt; on unsegmented boards.&lt;/summary&gt;
+        [JsonProperty("segment")] public string? Segment { get; set; }
+        /// &lt;summary&gt;ISO timestamp of the period this read snapshot is from. &lt;c&gt;"current"&lt;/c&gt; reads return the live period.&lt;/summary&gt;
+        [JsonProperty("period")] public string Period { get; set; } = string.Empty;
+        [JsonProperty("entries")] public List&lt;LeaderboardEntry&gt; Entries { get; set; } = new();
+        [JsonProperty("self")] public LeaderboardSelf? Self { get; set; }
+        /// &lt;summary&gt;Promotion/relegation cutoffs for this division, from server
+        /// config; &lt;c&gt;null&lt;/c&gt; when the board runs no ladder.&lt;/summary&gt;
+        [JsonProperty("progression")] public ProgressionLimits? Progression { get; set; }
+        /// &lt;summary&gt;
+        /// &lt;c&gt;true&lt;/c&gt; on the response to
+        /// &lt;see cref="LeaderboardsClient.JoinAsync"/&gt;; &lt;c&gt;false&lt;/c&gt; on plain
+        /// reads (the backend omits the field there).
+        /// &lt;/summary&gt;
+        [JsonProperty("joined")] public bool Joined { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// One entry of &lt;see cref="LeaderboardsClient.ListAsync"/&gt;: a
+    /// dashboard-configured board the game can show, so clients discover
+    /// board keys instead of hard-coding them.
+    /// &lt;/summary&gt;
+    public sealed class LeaderboardSummary
+    {
+        /// &lt;summary&gt;The board's stable game-scoped key; pass it to &lt;see cref="LeaderboardsClient.ReadAsync"/&gt;.&lt;/summary&gt;
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        /// &lt;summary&gt;LocalizedString (string or object); see backend docs/02 § English-only v1.&lt;/summary&gt;
+        [JsonProperty("name")] public JToken? Name { get; set; }
+        [JsonProperty("description")] public string? Description { get; set; }
+        /// &lt;summary&gt;One of &lt;c&gt;daily&lt;/c&gt;, &lt;c&gt;weekly&lt;/c&gt;, &lt;c&gt;monthly&lt;/c&gt;, &lt;c&gt;never&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("resetCadence")] public string ResetCadence { get; set; } = string.Empty;
+        /// &lt;summary&gt;ISO timestamp the current period ends; &lt;c&gt;null&lt;/c&gt; when the board never resets.&lt;/summary&gt;
+        [JsonProperty("nextResetAt")] public string? NextResetAt { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;false&lt;/c&gt; when only the studio's server may submit scores to this board.&lt;/summary&gt;
+        [JsonProperty("acceptClientScores")] public bool AcceptClientScores { get; set; }
+        /// &lt;summary&gt;
+        /// &lt;c&gt;playerContext&lt;/c&gt; fields that segment the board; pass one's
+        /// value as the segment on read / join / score. Progression
+        /// segments are resolved server-side and aren't listed.
+        /// &lt;/summary&gt;
+        [JsonProperty("contextSegments")] public List&lt;string&gt; ContextSegments { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// One snapshot period on a leaderboard. Returned by
+    /// &lt;see cref="LeaderboardsClient.ListPeriodsAsync"/&gt;; pass
+    /// &lt;see cref="PeriodStartedAt"/&gt; as &lt;c&gt;opts.Period&lt;/c&gt; on
+    /// &lt;see cref="LeaderboardsClient.ReadAsync"/&gt; to read that period's
+    /// snapshot.
+    /// &lt;/summary&gt;
+    public sealed class LeaderboardPeriod
+    {
+        [JsonProperty("periodStartedAt")] public string PeriodStartedAt { get; set; } = string.Empty;
+        [JsonProperty("periodEndedAt")] public string PeriodEndedAt { get; set; } = string.Empty;
+    }
+
+    /// &lt;summary&gt;
+    /// Response from &lt;see cref="LeaderboardsClient.ListPeriodsAsync"/&gt;: the
+    /// board's identity plus a newest-first list of finalized periods.
+    /// Useful for "last week's top 10" UI selectors.
+    /// &lt;/summary&gt;
+    public sealed class LeaderboardPeriods
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("leaderboardId")] public string LeaderboardId { get; set; } = string.Empty;
+        [JsonProperty("currentPeriodStartedAt")] public string CurrentPeriodStartedAt { get; set; } = string.Empty;
+        [JsonProperty("periods")] public List&lt;LeaderboardPeriod&gt; Periods { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// Response from &lt;see cref="EventLeaderboardsClient.ReadAsync"/&gt;: the
+    /// auto-generated per-event-window leaderboard, addressed by the UUID
+    /// returned in &lt;c&gt;Events.StartAsync(...)&lt;/c&gt;'s
+    /// &lt;c&gt;attempt.LeaderboardId&lt;/c&gt;. For most game UI you want
+    /// &lt;see cref="Leaderboard"/&gt; (the dashboard-configured board) instead.
+    /// &lt;/summary&gt;
+    public sealed class EventLeaderboard
+    {
+        [JsonProperty("leaderboardId")] public string LeaderboardId { get; set; } = string.Empty;
+        [JsonProperty("mode")] public string Mode { get; set; } = string.Empty;
+        /// &lt;summary&gt;&lt;c&gt;player&lt;/c&gt;, or &lt;c&gt;team&lt;/c&gt; on a co-op team board (rows are teams; &lt;c&gt;Self&lt;/c&gt; is your team).&lt;/summary&gt;
+        [JsonProperty("participantScope")] public string? ParticipantScope { get; set; }
+        [JsonProperty("finalized")] public bool Finalized { get; set; }
+        /// &lt;summary&gt;Why the board finalized; one of the
+        /// &lt;see cref="FinalizationReason"/&gt; constants
+        /// (&lt;c&gt;session_terminated&lt;/c&gt; vs &lt;c&gt;window_closed&lt;/c&gt;), or null while
+        /// the board is still live.&lt;/summary&gt;
+        [JsonProperty("finalizedReason")] public string? FinalizedReason { get; set; }
+        [JsonProperty("entries")] public List&lt;LeaderboardEntry&gt; Entries { get; set; } = new();
+        [JsonProperty("self")] public LeaderboardSelf? Self { get; set; }
+        /// &lt;summary&gt;Promotion/relegation cutoffs for this division, from server
+        /// config; &lt;c&gt;null&lt;/c&gt; when the event runs no ladder.&lt;/summary&gt;
+        [JsonProperty("progression")] public ProgressionLimits? Progression { get; set; }
+        /// &lt;summary&gt;
+        /// &lt;c&gt;true&lt;/c&gt; on the response to
+        /// &lt;see cref="EventLeaderboardsClient.JoinAsync"/&gt;; &lt;c&gt;false&lt;/c&gt; on
+        /// plain reads (the backend omits the field there).
+        /// &lt;/summary&gt;
+        [JsonProperty("joined")] public bool Joined { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// One segment block in a &lt;see cref="BoardStandings"/&gt; response.
+    /// &lt;/summary&gt;
+    public sealed class StandingsSegment
+    {
+        /// &lt;summary&gt;Bucket value; &lt;c&gt;null&lt;/c&gt; on unsegmented boards.&lt;/summary&gt;
+        [JsonProperty("segment")] public string? Segment { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;true&lt;/c&gt; when the caller appears in this segment for the period.&lt;/summary&gt;
+        [JsonProperty("participated")] public bool Participated { get; set; }
+        /// &lt;summary&gt;The caller's rank within this segment, or &lt;c&gt;null&lt;/c&gt; if not present.&lt;/summary&gt;
+        [JsonProperty("selfRank")] public int? SelfRank { get; set; }
+        [JsonProperty("entries")] public List&lt;LeaderboardEntry&gt; Entries { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// Response from &lt;see cref="LeaderboardsClient.StandingsAsync"/&gt;:
+    /// flexible multi-segment standings, the versatile counterpart to
+    /// &lt;see cref="Leaderboard"/&gt;. Returns one &lt;see cref="StandingsSegment"/&gt;
+    /// block per segment selected by &lt;c&gt;scope&lt;/c&gt;, live or for a past
+    /// period.
+    /// &lt;/summary&gt;
+    public sealed class BoardStandings
+    {
+        /// &lt;summary&gt;The board's stable game-scoped key (e.g. &lt;c&gt;"weekly_global"&lt;/c&gt;).&lt;/summary&gt;
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        /// &lt;summary&gt;UUID of the leaderboard config row.&lt;/summary&gt;
+        [JsonProperty("leaderboardId")] public string LeaderboardId { get; set; } = string.Empty;
+        /// &lt;summary&gt;One of &lt;c&gt;game&lt;/c&gt;, &lt;c&gt;studio&lt;/c&gt;, etc.; set in the board's config.&lt;/summary&gt;
+        [JsonProperty("scope")] public string Scope { get; set; } = string.Empty;
+        /// &lt;summary&gt;One of &lt;c&gt;never&lt;/c&gt;, &lt;c&gt;weekly&lt;/c&gt;, &lt;c&gt;monthly&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("resetCadence")] public string ResetCadence { get; set; } = string.Empty;
+        /// &lt;summary&gt;How concurrent scores combine: &lt;c&gt;best&lt;/c&gt;, &lt;c&gt;latest&lt;/c&gt;, &lt;c&gt;sum&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("scoreAggregation")] public string ScoreAggregation { get; set; } = string.Empty;
+        /// &lt;summary&gt;ISO timestamp of the period these standings are from.&lt;/summary&gt;
+        [JsonProperty("period")] public string Period { get; set; } = string.Empty;
+        [JsonProperty("segments")] public List&lt;StandingsSegment&gt; Segments { get; set; } = new();
+        /// &lt;summary&gt;&lt;c&gt;true&lt;/c&gt; when more segments existed than &lt;c&gt;maxSegments&lt;/c&gt; returned.&lt;/summary&gt;
+        [JsonProperty("segmentsTruncated")] public bool SegmentsTruncated { get; set; }
+    }
+
+    public sealed class Grant
+    {
+        [JsonProperty("id")] public string Id { get; set; } = string.Empty;
+        /// &lt;summary&gt;One of &lt;c&gt;reward&lt;/c&gt;, &lt;c&gt;crate&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("kind")] public string Kind { get; set; } = string.Empty;
+        [JsonProperty("contents")] public Dictionary&lt;string, JToken&gt; Contents { get; set; } = new();
+        [JsonProperty("sourceKind")] public string SourceKind { get; set; } = string.Empty;
+        [JsonProperty("sourceRefId")] public string? SourceRefId { get; set; }
+        [JsonProperty("parentGrantId")] public string? ParentGrantId { get; set; }
+        /// &lt;summary&gt;One of &lt;c&gt;pending&lt;/c&gt;, &lt;c&gt;claimed&lt;/c&gt;, &lt;c&gt;expired&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = string.Empty;
+        [JsonProperty("rolledAt")] public string? RolledAt { get; set; }
+        [JsonProperty("claimedAt")] public string? ClaimedAt { get; set; }
+        [JsonProperty("expiresAt")] public string? ExpiresAt { get; set; }
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+    }
+
+    public sealed class OpenCrateResponse
+    {
+        [JsonProperty("crate")] public Grant Crate { get; set; } = new();
+        [JsonProperty("contents")] public Grant Contents { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// One line of a client-initiated grant (see
+    /// &lt;see cref="GrantsClient.GrantAsync"/&gt;). Set &lt;see cref="Type"/&gt; to
+    /// &lt;c&gt;"currency"&lt;/c&gt; (+ &lt;see cref="CurrencyKey"/&gt; / &lt;see cref="Amount"/&gt;),
+    /// &lt;c&gt;"item"&lt;/c&gt; (+ &lt;see cref="ItemKey"/&gt; / &lt;see cref="Quantity"/&gt;), or
+    /// &lt;c&gt;"crate"&lt;/c&gt; (+ &lt;see cref="CrateItemKey"/&gt; / &lt;see cref="Quantity"/&gt;).
+    /// &lt;/summary&gt;
+    public sealed class GrantEntry
+    {
+        [JsonProperty("type")] public string Type { get; set; } = "item";
+        [JsonProperty("currencyKey", NullValueHandling = NullValueHandling.Ignore)] public string? CurrencyKey { get; set; }
+        [JsonProperty("amount", NullValueHandling = NullValueHandling.Ignore)] public double? Amount { get; set; }
+        [JsonProperty("itemKey", NullValueHandling = NullValueHandling.Ignore)] public string? ItemKey { get; set; }
+        [JsonProperty("crateItemKey", NullValueHandling = NullValueHandling.Ignore)] public string? CrateItemKey { get; set; }
+        [JsonProperty("quantity", NullValueHandling = NullValueHandling.Ignore)] public int? Quantity { get; set; }
+        [JsonProperty("parameters", NullValueHandling = NullValueHandling.Ignore)] public Dictionary&lt;string, object?&gt;? Parameters { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Body of a client-initiated grant. Self-only (you can only grant to the
+    /// active player); requires the game's inventory management to be
+    /// &lt;c&gt;permissive&lt;/c&gt;.
+    /// &lt;/summary&gt;
+    public sealed class GrantSelfInput
+    {
+        [JsonProperty("entries")] public List&lt;GrantEntry&gt; Entries { get; set; } = new();
+        /// &lt;summary&gt;Defaults to &lt;c&gt;"reward"&lt;/c&gt; server-side; use &lt;c&gt;"crate"&lt;/c&gt; for a crate grant.&lt;/summary&gt;
+        [JsonProperty("kind", NullValueHandling = NullValueHandling.Ignore)] public string? Kind { get; set; }
+        [JsonProperty("expiresAt", NullValueHandling = NullValueHandling.Ignore)] public string? ExpiresAt { get; set; }
+        [JsonProperty("metadata", NullValueHandling = NullValueHandling.Ignore)] public Dictionary&lt;string, object?&gt;? Metadata { get; set; }
+        [JsonProperty("idempotencyKey", NullValueHandling = NullValueHandling.Ignore)] public string? IdempotencyKey { get; set; }
+    }
+
+    public sealed class Lobby
+    {
+        [JsonProperty("id")] public string Id { get; set; } = string.Empty;
+        [JsonProperty("eventId")] public string EventId { get; set; } = string.Empty;
+        [JsonProperty("eventWindowId")] public string EventWindowId { get; set; } = string.Empty;
+        [JsonProperty("leaderboardId")] public string? LeaderboardId { get; set; }
+        [JsonProperty("mode")] public string Mode { get; set; } = string.Empty;
+        /// &lt;summary&gt;One of &lt;c&gt;forming&lt;/c&gt;, &lt;c&gt;active&lt;/c&gt;, &lt;c&gt;closed&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = string.Empty;
+        [JsonProperty("capacity")] public int Capacity { get; set; }
+        [JsonProperty("fillBy")] public string? FillBy { get; set; }
+        [JsonProperty("participantCount")] public int ParticipantCount { get; set; }
+
+        /// &lt;summary&gt;
+        /// Projected bot count at read time, derived server-side from
+        /// the lobby's age and the matchmaking drip interval. Grows
+        /// monotonically while the lobby is &lt;c&gt;forming&lt;/c&gt;. UI typically
+        /// renders &lt;c&gt;ParticipantCount + BotSlots&lt;/c&gt; filled cells out
+        /// of &lt;c&gt;Capacity&lt;/c&gt; for a smooth fill animation.
+        /// &lt;/summary&gt;
+        [JsonProperty("botSlots")] public int BotSlots { get; set; }
+
+        [JsonProperty("startedAt")] public string? StartedAt { get; set; }
+        [JsonProperty("endsAt")] public string? EndsAt { get; set; }
+
+        /// &lt;summary&gt;
+        /// Total filled cells (humans + projected bots). Capped at
+        /// capacity in case server / client clocks ever disagree
+        /// mid-drip.
+        /// &lt;/summary&gt;
+        [JsonIgnore]
+        public int FilledSlots
+        {
+            get
+            {
+                var total = ParticipantCount + BotSlots;
+                return total &gt; Capacity ? Capacity : total;
+            }
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// Input for &lt;see cref="EventsClient.ProgressAsync"/&gt;. Supply either
+    /// &lt;see cref="MetricValue"/&gt; (single-metric events) or
+    /// &lt;see cref="Metrics"/&gt; (multi-metric). &lt;see cref="IdempotencyKey"/&gt;
+    /// is auto-generated by the client if you leave it null.
+    /// &lt;/summary&gt;
+    public sealed class ProgressInput
+    {
+        /// &lt;summary&gt;&lt;c&gt;set&lt;/c&gt; writes the value as the new metric; &lt;c&gt;increment&lt;/c&gt; adds.&lt;/summary&gt;
+        [JsonProperty("mode")] public string Mode { get; set; } = "set";
+        [JsonProperty("metricValue")] public double? MetricValue { get; set; }
+        [JsonProperty("metrics")] public Dictionary&lt;string, double&gt;? Metrics { get; set; }
+        [JsonProperty("occurredAt")] public string? OccurredAt { get; set; }
+        [JsonProperty("idempotencyKey")] public string? IdempotencyKey { get; set; }
+        /// &lt;summary&gt;
+        /// Team events: which of the player's teams this progress counts for.
+        /// Needed only when the player holds several seats and the event
+        /// routes to a chosen team (partner bars).
+        /// &lt;/summary&gt;
+        [JsonProperty("eventTeamId", NullValueHandling = NullValueHandling.Ignore)] public string? EventTeamId { get; set; }
+    }
+
+    // ── Co-op team events ─────────────────────────────────────────────
+
+    /// &lt;summary&gt;&lt;see cref="EventListing.TeamOptions"/&gt;: what a client needs to get a player onto a team.&lt;/summary&gt;
+    public sealed class TeamClientOptions
+    {
+        [JsonProperty("maxMembers")] public int MaxMembers { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;auto_match&lt;/c&gt;: players per matched team (2 on partner events); null otherwise.&lt;/summary&gt;
+        [JsonProperty("teamSize")] public int? TeamSize { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;partner_slots&lt;/c&gt;: partner bars a player may hold; null otherwise.&lt;/summary&gt;
+        [JsonProperty("maxPartners")] public int? MaxPartners { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;partner_slots&lt;/c&gt;: whether a random partner is offered; null otherwise.&lt;/summary&gt;
+        [JsonProperty("allowRandom")] public bool? AllowRandom { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;attribute&lt;/c&gt;: player-context keys the team is keyed by. The server-resolved &lt;c&gt;country&lt;/c&gt; is never listed.&lt;/summary&gt;
+        [JsonProperty("contextKeys")] public List&lt;string&gt; ContextKeys { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;One of the player's team seats, as the events listing / start / progress / finish return it.&lt;/summary&gt;
+    public sealed class TeamSeatView
+    {
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        [JsonProperty("teamKey")] public string TeamKey { get; set; } = string.Empty;
+        [JsonProperty("displayName")] public string DisplayName { get; set; } = string.Empty;
+        [JsonProperty("badge")] public string? Badge { get; set; }
+        [JsonProperty("formation")] public string Formation { get; set; } = string.Empty;
+        /// &lt;summary&gt;&lt;c&gt;forming&lt;/c&gt; (partner invite pending) / &lt;c&gt;active&lt;/c&gt; / &lt;c&gt;closed&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = "active";
+        [JsonProperty("score")] public double Score { get; set; }
+        [JsonProperty("memberCount")] public int MemberCount { get; set; }
+        /// &lt;summary&gt;Null when the event has no team goal. &lt;c&gt;Remaining&lt;/c&gt; is the boss HP.&lt;/summary&gt;
+        [JsonProperty("goal")] public TeamGoal? Goal { get; set; }
+        [JsonProperty("milestones")] public List&lt;TeamSeatMilestone&gt; Milestones { get; set; } = new();
+        [JsonProperty("seat")] public TeamSeatState Seat { get; set; } = new();
+        /// &lt;summary&gt;The team board, once the team entered one.&lt;/summary&gt;
+        [JsonProperty("leaderboardId")] public string? LeaderboardId { get; set; }
+        /// &lt;summary&gt;Your team's place on that board: live during the window, final after close.&lt;/summary&gt;
+        [JsonProperty("boardRank")] public int? BoardRank { get; set; }
+        /// &lt;summary&gt;Partner events: your bar over all your pairs and its checkpoints.&lt;/summary&gt;
+        [JsonProperty("rollup")] public TeamRollup? Rollup { get; set; }
+    }
+
+    public sealed class TeamGoal
+    {
+        [JsonProperty("target")] public double Target { get; set; }
+        [JsonProperty("remaining")] public double Remaining { get; set; }
+        [JsonProperty("completed")] public bool Completed { get; set; }
+    }
+
+    public sealed class TeamSeatMilestone
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        /// &lt;summary&gt;After goal scaling.&lt;/summary&gt;
+        [JsonProperty("threshold")] public double Threshold { get; set; }
+        [JsonProperty("unlocked")] public bool Unlocked { get; set; }
+        /// &lt;summary&gt;You were paid this tier.&lt;/summary&gt;
+        [JsonProperty("paid")] public bool Paid { get; set; }
+        /// &lt;summary&gt;Unlocked while you were on the team; pays once your own contribution reaches the minimum.&lt;/summary&gt;
+        [JsonProperty("pendingMinContribution")] public bool PendingMinContribution { get; set; }
+    }
+
+    public sealed class TeamSeatState
+    {
+        [JsonProperty("seatId")] public string SeatId { get; set; } = string.Empty;
+        /// &lt;summary&gt;&lt;c&gt;invited&lt;/c&gt; / &lt;c&gt;active&lt;/c&gt; / &lt;c&gt;left&lt;/c&gt; / &lt;c&gt;removed&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = "active";
+        [JsonProperty("contribution")] public double Contribution { get; set; }
+        /// &lt;summary&gt;Your 1-based rank inside the team.&lt;/summary&gt;
+        [JsonProperty("rank")] public int Rank { get; set; }
+        [JsonProperty("locked")] public bool Locked { get; set; }
+    }
+
+    public sealed class TeamRollup
+    {
+        [JsonProperty("value")] public double Value { get; set; }
+        [JsonProperty("milestones")] public List&lt;TeamRollupMilestone&gt; Milestones { get; set; } = new();
+    }
+
+    public sealed class TeamRollupMilestone
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("threshold")] public double Threshold { get; set; }
+        [JsonProperty("reached")] public bool Reached { get; set; }
+        [JsonProperty("paid")] public bool Paid { get; set; }
+    }
+
+    /// &lt;summary&gt;One teammate, as &lt;see cref="EventsClient.TeamMembersAsync"/&gt; returns them.&lt;/summary&gt;
+    public sealed class EventTeamMember
+    {
+        [JsonProperty("externalPlayerId")] public string? ExternalPlayerId { get; set; }
+        [JsonProperty("name")] public string? Name { get; set; }
+        [JsonProperty("avatar")] public string? Avatar { get; set; }
+        [JsonProperty("contribution")] public double Contribution { get; set; }
+        [JsonProperty("rank")] public int Rank { get; set; }
+        [JsonProperty("status")] public string Status { get; set; } = "active";
+        [JsonProperty("isSelf")] public bool IsSelf { get; set; }
+    }
+
+    public sealed class EventTeamMembersPage
+    {
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        [JsonProperty("teamKey")] public string TeamKey { get; set; } = string.Empty;
+        [JsonProperty("memberCount")] public int MemberCount { get; set; }
+        [JsonProperty("members")] public List&lt;EventTeamMember&gt; Members { get; set; } = new();
+        /// &lt;summary&gt;Pass back as &lt;c&gt;cursor&lt;/c&gt; for the next page; null on the last page.&lt;/summary&gt;
+        [JsonProperty("nextCursor")] public string? NextCursor { get; set; }
+    }
+
+    /// &lt;summary&gt;&lt;see cref="EventsClient.MatchTeamAsync"/&gt;: your auto-matched team.&lt;/summary&gt;
+    public sealed class TeamMatchResult
+    {
+        [JsonProperty("windowId")] public string WindowId { get; set; } = string.Empty;
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        [JsonProperty("created")] public bool Created { get; set; }
+        [JsonProperty("teams")] public List&lt;TeamSeatView&gt; Teams { get; set; } = new();
+    }
+
+    public sealed class PartnerPlayer
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+    }
+
+    /// &lt;summary&gt;A partner invite (its id is the pair's &lt;c&gt;EventTeamId&lt;/c&gt;).&lt;/summary&gt;
+    public sealed class PartnerInvite
+    {
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        /// &lt;summary&gt;&lt;c&gt;pending&lt;/c&gt; / &lt;c&gt;accepted&lt;/c&gt; / &lt;c&gt;declined&lt;/c&gt; / &lt;c&gt;cancelled&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = "pending";
+        [JsonProperty("from")] public PartnerPlayer From { get; set; } = new();
+        [JsonProperty("to")] public PartnerPlayer To { get; set; } = new();
+        [JsonProperty("expiresAt")] public string? ExpiresAt { get; set; }
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        /// &lt;summary&gt;Set on an accept: your seats after it.&lt;/summary&gt;
+        [JsonProperty("teams")] public List&lt;TeamSeatView&gt;? Teams { get; set; }
+    }
+
+    /// &lt;summary&gt;&lt;see cref="EventsClient.RandomPartnerAsync"/&gt;: paired with someone waiting, or your bar waits.&lt;/summary&gt;
+    public sealed class RandomPartnerResult
+    {
+        /// &lt;summary&gt;&lt;c&gt;paired&lt;/c&gt; or &lt;c&gt;waiting&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = "waiting";
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        [JsonProperty("teams")] public List&lt;TeamSeatView&gt; Teams { get; set; } = new();
+    }
+
+    public sealed class PartnerSuggestion
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        /// &lt;summary&gt;An accepted friend (friends are listed first).&lt;/summary&gt;
+        [JsonProperty("isFriend")] public bool IsFriend { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Per-call options for &lt;see cref="LeaderboardsClient.ReadAsync"/&gt;.
+    /// &lt;/summary&gt;
+    public sealed class LeaderboardReadOptions
+    {
+        /// &lt;summary&gt;1–200, default 50 server-side.&lt;/summary&gt;
+        public int? Limit { get; set; }
+        /// &lt;summary&gt;
+        /// Progression economy keys to attach to each player entry (max 8),
+        /// e.g. &lt;c&gt;new[] { "level" }&lt;/c&gt;. Omit and nothing extra is read
+        /// server-side.
+        /// &lt;/summary&gt;
+        public IEnumerable&lt;string&gt;? Progression { get; set; }
+
+        /// &lt;summary&gt;
+        /// Bucket value for segmented boards. Required only for
+        /// &lt;c&gt;context&lt;/c&gt; segmentation: pass the same value your SDK
+        /// supplied in &lt;c&gt;playerContext[segmentation.key]&lt;/c&gt; when
+        /// starting the contributing attempt. For
+        /// &lt;c&gt;progression&lt;/c&gt;-segmented boards leave this null: the
+        /// server derives the caller's division. Unsegmented boards
+        /// ignore it.
+        /// &lt;/summary&gt;
+        public string? Segment { get; set; }
+        /// &lt;summary&gt;
+        /// &lt;c&gt;"current"&lt;/c&gt; (default) reads the live period off Redis; an ISO
+        /// timestamp (typically one of
+        /// &lt;see cref="LeaderboardPeriod.PeriodStartedAt"/&gt;) reads the
+        /// snapshotted final ranks for that period.
+        /// &lt;/summary&gt;
+        public string? Period { get; set; }
+        /// &lt;summary&gt;When true, response includes &lt;c&gt;self: { rank, score }&lt;/c&gt; (live periods only).&lt;/summary&gt;
+        public bool IncludeSelf { get; set; }
+        /// &lt;summary&gt;Required when &lt;see cref="IncludeSelf"/&gt; is true.&lt;/summary&gt;
+        public string? ExternalId { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Per-call options for &lt;see cref="LeaderboardsClient.JoinAsync"/&gt;.
+    /// &lt;/summary&gt;
+    public sealed class LeaderboardJoinOptions
+    {
+        /// &lt;summary&gt;
+        /// Bucket value for segmented boards. Required only for
+        /// &lt;c&gt;context&lt;/c&gt; segmentation. For &lt;c&gt;progression&lt;/c&gt;-segmented
+        /// boards leave this null; the server derives the player's
+        /// division. Unsegmented boards ignore it.
+        /// &lt;/summary&gt;
+        public string? Segment { get; set; }
+        /// &lt;summary&gt;1–200, default 50 server-side.&lt;/summary&gt;
+        public int? Limit { get; set; }
+        /// &lt;summary&gt;
+        /// Override the active player (server-side tooling only). Leave
+        /// null to target the SDK's active identity.
+        /// &lt;/summary&gt;
+        public string? ExternalId { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Per-call options for &lt;see cref="LeaderboardsClient.StandingsAsync"/&gt;.
+    /// &lt;/summary&gt;
+    public sealed class StandingsReadOptions
+    {
+        /// &lt;summary&gt;
+        /// Progression economy keys to attach to each player entry (max 8),
+        /// e.g. &lt;c&gt;new[] { "level" }&lt;/c&gt;. Omit and nothing extra is read
+        /// server-side.
+        /// &lt;/summary&gt;
+        public IEnumerable&lt;string&gt;? Progression { get; set; }
+
+        /// &lt;summary&gt;
+        /// Which segments to return (default &lt;c&gt;"all"&lt;/c&gt;):
+        /// &lt;list type="bullet"&gt;
+        ///   &lt;item&gt;&lt;description&gt;&lt;c&gt;"self_segment"&lt;/c&gt;: the caller's single home segment.&lt;/description&gt;&lt;/item&gt;
+        ///   &lt;item&gt;&lt;description&gt;&lt;c&gt;"mine"&lt;/c&gt;: every segment the caller appears in.&lt;/description&gt;&lt;/item&gt;
+        ///   &lt;item&gt;&lt;description&gt;&lt;c&gt;"segment"&lt;/c&gt;: the one named in &lt;see cref="Segment"/&gt;.&lt;/description&gt;&lt;/item&gt;
+        ///   &lt;item&gt;&lt;description&gt;&lt;c&gt;"all"&lt;/c&gt;: every segment for the period.&lt;/description&gt;&lt;/item&gt;
+        /// &lt;/list&gt;
+        /// &lt;c&gt;self_segment&lt;/c&gt;/&lt;c&gt;mine&lt;/c&gt; resolve the caller from
+        /// &lt;see cref="ExternalId"/&gt; (or the SDK's active identity).
+        /// &lt;/summary&gt;
+        public string? Scope { get; set; }
+        /// &lt;summary&gt;Required when &lt;see cref="Scope"/&gt; is &lt;c&gt;"segment"&lt;/c&gt; on a segmented board.&lt;/summary&gt;
+        public string? Segment { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;"current"&lt;/c&gt; (default) or an ISO period timestamp from &lt;see cref="LeaderboardsClient.ListPeriodsAsync"/&gt;.&lt;/summary&gt;
+        public string? Period { get; set; }
+        /// &lt;summary&gt;Flags &lt;c&gt;isSelf&lt;/c&gt;/&lt;c&gt;selfRank&lt;/c&gt;; auto-resolved for &lt;c&gt;self_segment&lt;/c&gt;/&lt;c&gt;mine&lt;/c&gt;.&lt;/summary&gt;
+        public string? ExternalId { get; set; }
+        /// &lt;summary&gt;Per-segment top-N (1–200, default 50 server-side).&lt;/summary&gt;
+        public int? Limit { get; set; }
+        /// &lt;summary&gt;Cap on returned segment blocks (1–100, default 20 server-side).&lt;/summary&gt;
+        public int? MaxSegments { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Per-call options for &lt;see cref="EventLeaderboardsClient.ReadAsync"/&gt;.
+    /// &lt;/summary&gt;
+    public sealed class EventLeaderboardReadOptions
+    {
+        /// &lt;summary&gt;1–200, default 50 server-side.&lt;/summary&gt;
+        public int? Limit { get; set; }
+        /// &lt;summary&gt;When true, response includes &lt;c&gt;self: { rank, score }&lt;/c&gt;.&lt;/summary&gt;
+        public bool IncludeSelf { get; set; }
+        /// &lt;summary&gt;Required when &lt;see cref="IncludeSelf"/&gt; is true.&lt;/summary&gt;
+        public string? ExternalId { get; set; }
+        /// &lt;summary&gt;
+        /// Progression economy keys to attach to each player entry (max 8),
+        /// e.g. &lt;c&gt;new[] { "level" }&lt;/c&gt;. Omit and nothing extra is read
+        /// server-side.
+        /// &lt;/summary&gt;
+        public IEnumerable&lt;string&gt;? Progression { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Per-call options for &lt;see cref="EventLeaderboardsClient.JoinAsync"/&gt;.
+    /// &lt;/summary&gt;
+    public sealed class EventLeaderboardJoinOptions
+    {
+        /// &lt;summary&gt;1–200, default 50 server-side.&lt;/summary&gt;
+        public int? Limit { get; set; }
+        /// &lt;summary&gt;
+        /// Override the active player (server-side tooling only). Leave
+        /// null to target the SDK's active identity.
+        /// &lt;/summary&gt;
+        public string? ExternalId { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Result of &lt;see cref="LeaderboardsClient.SubmitScoreAsync"/&gt;: the
+    /// player's new standing on the board after the write.
+    /// &lt;see cref="Rank"/&gt; is &lt;c&gt;null&lt;/c&gt; when the board can't resolve a
+    /// position for the caller yet (e.g. the period just rolled over,
+    /// or the score didn't beat a &lt;c&gt;best&lt;/c&gt;-aggregation board's
+    /// existing entry).
+    /// &lt;/summary&gt;
+    public sealed class LeaderboardScoreResult
+    {
+        /// &lt;summary&gt;UUID of the leaderboard config row the score landed on.&lt;/summary&gt;
+        [JsonProperty("leaderboardId")] public string LeaderboardId { get; set; } = string.Empty;
+        /// &lt;summary&gt;The score now recorded for the player on this board.&lt;/summary&gt;
+        [JsonProperty("score")] public double Score { get; set; }
+        /// &lt;summary&gt;The player's rank after the write, or &lt;c&gt;null&lt;/c&gt; if not yet ranked.&lt;/summary&gt;
+        [JsonProperty("rank")] public int? Rank { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Per-call options for &lt;see cref="LeaderboardsClient.SubmitScoreAsync"/&gt;.
+    /// &lt;/summary&gt;
+    public sealed class LeaderboardSubmitOptions
+    {
+        /// &lt;summary&gt;
+        /// Bucket value for segmented boards. Required only for
+        /// &lt;c&gt;context&lt;/c&gt; segmentation. For &lt;c&gt;progression&lt;/c&gt;-segmented
+        /// boards leave this null; the server derives the player's
+        /// division. Unsegmented boards ignore it.
+        /// &lt;/summary&gt;
+        public string? Segment { get; set; }
+        /// &lt;summary&gt;Optional override; leave null to let the client auto-stamp one.&lt;/summary&gt;
+        public string? IdempotencyKey { get; set; }
+        /// &lt;summary&gt;
+        /// Override the active player (server-side tooling only). Leave
+        /// null to target the SDK's active identity.
+        /// &lt;/summary&gt;
+        public string? ExternalId { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Result of &lt;c&gt;players.register()&lt;/c&gt;. The plaintext
+    /// &lt;see cref="Secret"/&gt; is only ever surfaced HERE, so store it
+    /// locally on the device immediately (e.g. &lt;c&gt;PlayerPrefs&lt;/c&gt; via
+    /// &lt;c&gt;PlayerPrefsSecretStore&lt;/c&gt;). A subsequent call to
+    /// &lt;see cref="PlayersClient.RegisterAsync"/&gt; for the same player
+    /// returns 409 &lt;c&gt;player_already_registered&lt;/c&gt;; lost-secret
+    /// recovery is a studio-side admin flow, not a client capability.
+    /// &lt;/summary&gt;
+    public sealed class PlayerRegistration
+    {
+        [JsonProperty("playerId")] public string PlayerId { get; set; } = string.Empty;
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("secret")] public string Secret { get; set; } = string.Empty;
+        [JsonProperty("secretPrefix")] public string? SecretPrefix { get; set; }
+        [JsonProperty("registeredAt")] public string? RegisteredAt { get; set; }
+        /// &lt;summary&gt;ISO-3166 alpha-2 country resolved server-side.&lt;/summary&gt;
+        [JsonProperty("country")] public string? Country { get; set; }
+        /// &lt;summary&gt;
+        /// Real display identity: reflects the value &lt;c&gt;SetIdentity&lt;/c&gt;
+        /// wrote, falling back to the synthetic-pool value when the
+        /// player never renamed themselves. Enriched with country.
+        /// &lt;/summary&gt;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        /// &lt;summary&gt;
+        /// Immutable anonymized identity (synthetic-pool value) enriched
+        /// with country. Untouched by &lt;c&gt;SetIdentity&lt;/c&gt;; use it for
+        /// privacy-preserving surfaces (public boards).
+        /// &lt;/summary&gt;
+        [JsonProperty("anonymizedIdentity")] public PlayerIdentity? AnonymizedIdentity { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Public identity envelope: &lt;c&gt;Name&lt;/c&gt; + optional &lt;c&gt;Avatar&lt;/c&gt;
+    /// enriched with the player's &lt;c&gt;Country&lt;/c&gt;. Returned by both
+    /// &lt;see cref="PlayersClient.GetIdentityAsync"/&gt; (real display value)
+    /// and &lt;see cref="PlayersClient.GetAnonymizedIdentityAsync"/&gt; (the
+    /// immutable synthetic-pool value); &lt;c&gt;Country&lt;/c&gt; is the same on
+    /// either view because a player has one real country regardless of
+    /// which name/avatar the caller chose to render.
+    /// &lt;/summary&gt;
+    public sealed class PlayerIdentity
+    {
+        [JsonProperty("name")] public string Name { get; set; } = string.Empty;
+        [JsonProperty("avatar")] public string? Avatar { get; set; }
+        [JsonProperty("country")] public string? Country { get; set; }
+    }
+
+    /// &lt;summary&gt;Response of &lt;c&gt;PUT /sdk/v1/players/:externalId/identity&lt;/c&gt;.&lt;/summary&gt;
+    public sealed class SetIdentityResult
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        [JsonProperty("anonymizedIdentity")] public PlayerIdentity? AnonymizedIdentity { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Response of &lt;c&gt;PUT/PATCH /sdk/v1/players/:externalId/metadata&lt;/c&gt;.
+    /// The full metadata bag AFTER the write (so a PATCH caller can see
+    /// the merged result without a follow-up GET).
+    /// &lt;/summary&gt;
+    public sealed class PlayerMetadataResult
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("metadata")] public Dictionary&lt;string, object?&gt; Metadata { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// One row in the player's platform-managed inventory. Returned by
+    /// &lt;c&gt;GET /sdk/v1/players/:externalId/inventory&lt;/c&gt;. The item's
+    /// display name and other catalog metadata live on the &lt;c&gt;items&lt;/c&gt;
+    /// table; the SDK only carries the per-player quantity + free-form
+    /// metadata stamped on deposits (e.g. a granted potion's roll
+    /// details).
+    /// &lt;/summary&gt;
+    public sealed class PlayerItemHolding
+    {
+        [JsonProperty("itemKey")] public string ItemKey { get; set; } = string.Empty;
+        [JsonProperty("quantity")] public int Quantity { get; set; }
+        [JsonProperty("metadata")] public Dictionary&lt;string, JToken&gt; Metadata { get; set; } = new();
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        [JsonProperty("updatedAt")] public string UpdatedAt { get; set; } = string.Empty;
+    }
+
+    /// &lt;summary&gt;
+    /// The game's daily login calendar as the player sees it
+    /// (&lt;c&gt;GET /sdk/v1/players/:p/daily-login&lt;/c&gt;). The server pays each
+    /// day's reward on the player's first session of that UTC day, as a
+    /// grant with &lt;c&gt;SourceKind == "daily_login"&lt;/c&gt;; read this to draw
+    /// the calendar.
+    /// &lt;/summary&gt;
+    public sealed class DailyLogin
+    {
+        /// &lt;summary&gt;Day 1 first; each day's reward entries as configured in the dashboard.&lt;/summary&gt;
+        [JsonProperty("days")] public List&lt;DailyLoginDay&gt; Days { get; set; } = new();
+        /// &lt;summary&gt;&lt;c&gt;restart&lt;/c&gt;, &lt;c&gt;hold_last&lt;/c&gt; or &lt;c&gt;stop&lt;/c&gt;: what a streak longer than the calendar does.&lt;/summary&gt;
+        [JsonProperty("afterLastDay")] public string AfterLastDay { get; set; } = "restart";
+        /// &lt;summary&gt;Progression item holding &lt;see cref="CurrentDay"/&gt;, for clients already reading the wallet.&lt;/summary&gt;
+        [JsonProperty("itemKey")] public string ItemKey { get; set; } = string.Empty;
+        /// &lt;summary&gt;Consecutive UTC days with a session; 0 once a day was missed.&lt;/summary&gt;
+        [JsonProperty("loginStreak")] public int LoginStreak { get; set; }
+        /// &lt;summary&gt;Calendar day the player is on (1..Days.Count); 0 without a streak.&lt;/summary&gt;
+        [JsonProperty("currentDay")] public int CurrentDay { get; set; }
+        /// &lt;summary&gt;Whether today's reward has been granted already.&lt;/summary&gt;
+        [JsonProperty("paidToday")] public bool PaidToday { get; set; }
+        /// &lt;summary&gt;The grant that paid today, to match against the grant list or inventory stream.&lt;/summary&gt;
+        [JsonProperty("todayGrantId")] public string? TodayGrantId { get; set; }
+        /// &lt;summary&gt;ISO start of the next UTC day: when the next day's reward can be earned.&lt;/summary&gt;
+        [JsonProperty("nextDayAt")] public string NextDayAt { get; set; } = string.Empty;
+    }
+
+    /// &lt;summary&gt;One day of a &lt;see cref="DailyLogin"/&gt; calendar.&lt;/summary&gt;
+    public sealed class DailyLoginDay
+    {
+        [JsonProperty("day")] public int Day { get; set; }
+        /// &lt;summary&gt;Reward entries, e.g. &lt;c&gt;{ "type": "currency", "currencyKey": "gems", "amount": 10 }&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("entries")] public List&lt;Dictionary&lt;string, JToken&gt;&gt; Entries { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// One row in the player's wallet. Wallets are kind-agnostic: a
+    /// &lt;c&gt;gold&lt;/c&gt; currency entry sits beside a &lt;c&gt;trophies&lt;/c&gt;
+    /// progression entry with the same shape. The owning currency's
+    /// &lt;c&gt;kind&lt;/c&gt; lives on the catalog row, not here.
+    /// &lt;/summary&gt;
+    public sealed class PlayerWalletHolding
+    {
+        [JsonProperty("economyKey")] public string EconomyKey { get; set; } = string.Empty;
+        [JsonProperty("balance")] public int Balance { get; set; }
+        [JsonProperty("metadata")] public Dictionary&lt;string, JToken&gt; Metadata { get; set; } = new();
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        [JsonProperty("updatedAt")] public string UpdatedAt { get; set; } = string.Empty;
+    }
+
+    /// &lt;summary&gt;
+    /// Input for &lt;see cref="PurchasesClient.TrackAsync"/&gt; (a.k.a.
+    /// &lt;c&gt;kraty.TrackPurchaseAsync&lt;/c&gt;).
+    ///
+    /// &lt;para&gt;
+    /// &lt;see cref="AmountMinor"/&gt; is in the currency's MINOR units as
+    /// charged — cents for USD, whole yen for JPY. Unity IAP already
+    /// reports minor units, so pass its value through unchanged rather
+    /// than converting to a &lt;c&gt;decimal&lt;/c&gt; or &lt;c&gt;float&lt;/c&gt;.
+    /// &lt;/para&gt;
+    ///
+    /// &lt;para&gt;
+    /// There is no idempotency key: &lt;see cref="TransactionId"/&gt; IS the
+    /// idempotency key and it comes from the store. Calling this
+    /// repeatedly for one transaction records nothing new and moves no
+    /// total, so calling it unconditionally on every restore is the
+    /// intended usage.
+    /// &lt;/para&gt;
+    /// &lt;/summary&gt;
+    public sealed class TrackPurchaseInput
+    {
+        /// &lt;summary&gt;The store's transaction id. Used for dedupe.&lt;/summary&gt;
+        [JsonProperty("transactionId")] public string TransactionId { get; set; } = string.Empty;
+
+        /// &lt;summary&gt;
+        /// One of &lt;c&gt;app_store&lt;/c&gt;, &lt;c&gt;google_play&lt;/c&gt;, &lt;c&gt;steam&lt;/c&gt;,
+        /// &lt;c&gt;epic&lt;/c&gt;, &lt;c&gt;amazon&lt;/c&gt;, &lt;c&gt;microsoft&lt;/c&gt;,
+        /// &lt;c&gt;playstation&lt;/c&gt;, &lt;c&gt;nintendo&lt;/c&gt;, &lt;c&gt;web&lt;/c&gt;, &lt;c&gt;other&lt;/c&gt;.
+        /// &lt;/summary&gt;
+        [JsonProperty("store")] public string Store { get; set; } = string.Empty;
+
+        /// &lt;summary&gt;The store's product id / SKU.&lt;/summary&gt;
+        [JsonProperty("productId")] public string ProductId { get; set; } = string.Empty;
+
+        /// &lt;summary&gt;
+        /// One of &lt;c&gt;consumable&lt;/c&gt;, &lt;c&gt;non_consumable&lt;/c&gt;,
+        /// &lt;c&gt;subscription&lt;/c&gt;. Optional.
+        /// &lt;/summary&gt;
+        [JsonProperty("productType")] public string? ProductType { get; set; }
+
+        /// &lt;summary&gt;Minor units as charged: &lt;c&gt;499&lt;/c&gt; is $4.99 in USD, ¥499 in JPY.&lt;/summary&gt;
+        [JsonProperty("amountMinor")] public int AmountMinor { get; set; }
+
+        /// &lt;summary&gt;ISO 4217 alpha-3, e.g. &lt;c&gt;"USD"&lt;/c&gt;, &lt;c&gt;"BRL"&lt;/c&gt;, &lt;c&gt;"JPY"&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("currency")] public string Currency { get; set; } = string.Empty;
+
+        /// &lt;summary&gt;Store receipt / purchase token, retained for later validation.&lt;/summary&gt;
+        [JsonProperty("receipt")] public string? Receipt { get; set; }
+
+        /// &lt;summary&gt;ISO-8601. Defaults to the server's clock when null.&lt;/summary&gt;
+        [JsonProperty("purchasedAt")] public string? PurchasedAt { get; set; }
+
+        /// &lt;summary&gt;Arbitrary studio fields: campaign id, A/B bucket, ….&lt;/summary&gt;
+        [JsonProperty("metadata")] public Dictionary&lt;string, object?&gt;? Metadata { get; set; }
+
+        /// &lt;summary&gt;
+        /// The offer this purchase was made from: &lt;see cref="Offer.InstanceId"/&gt;
+        /// from &lt;see cref="OffersClient.ListAsync"/&gt;. Only a purchase carrying it
+        /// can advance the offer (and, when the offer opted in, have Kraty grant
+        /// its contents); without it the SKU is matched for revenue reporting only.
+        /// &lt;/summary&gt;
+        [JsonProperty("offerInstanceId")] public string? OfferInstanceId { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Result of &lt;see cref="PurchasesClient.TrackAsync"/&gt;. Carries both
+    /// what the player was charged (&lt;see cref="AmountMinor"/&gt; +
+    /// &lt;see cref="Currency"/&gt;) and the normalized USD value
+    /// (&lt;see cref="NormalizedAmountMinor"/&gt;, always USD cents) that
+    /// spend thresholds and revenue reporting compare against.
+    ///
+    /// &lt;para&gt;
+    /// &lt;see cref="Deduplicated"/&gt; is true when this transaction id was
+    /// already on file. That is a success, not an error: the client
+    /// asked "is this recorded?" and the answer is yes.
+    /// &lt;/para&gt;
+    /// &lt;/summary&gt;
+    public sealed class TrackPurchaseResult
+    {
+        [JsonProperty("purchaseId")] public string PurchaseId { get; set; } = string.Empty;
+        [JsonProperty("transactionId")] public string TransactionId { get; set; } = string.Empty;
+        [JsonProperty("store")] public string Store { get; set; } = string.Empty;
+        [JsonProperty("productId")] public string ProductId { get; set; } = string.Empty;
+        [JsonProperty("productType")] public string? ProductType { get; set; }
+        [JsonProperty("amountMinor")] public int AmountMinor { get; set; }
+        [JsonProperty("currency")] public string Currency { get; set; } = string.Empty;
+
+        /// &lt;summary&gt;USD cents.&lt;/summary&gt;
+        [JsonProperty("normalizedAmountMinor")] public int NormalizedAmountMinor { get; set; }
+
+        /// &lt;summary&gt;Always &lt;c&gt;"USD"&lt;/c&gt;. Present so callers never hardcode the base currency.&lt;/summary&gt;
+        [JsonProperty("normalizedCurrency")] public string NormalizedCurrency { get; set; } = "USD";
+
+        [JsonProperty("fxRate")] public double FxRate { get; set; }
+
+        /// &lt;summary&gt;One of &lt;c&gt;unverified&lt;/c&gt;, &lt;c&gt;verified&lt;/c&gt;, &lt;c&gt;failed&lt;/c&gt;, &lt;c&gt;skipped&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("validationStatus")] public string ValidationStatus { get; set; } = string.Empty;
+
+        [JsonProperty("purchasedAt")] public string PurchasedAt { get; set; } = string.Empty;
+        [JsonProperty("metadata")] public Dictionary&lt;string, object?&gt;? Metadata { get; set; }
+
+        /// &lt;summary&gt;True when this transaction id was already on file — a replay.&lt;/summary&gt;
+        [JsonProperty("deduplicated")] public bool Deduplicated { get; set; }
+
+        /// &lt;summary&gt;The player's lifetime spend in USD cents, after this purchase.&lt;/summary&gt;
+        [JsonProperty("lifetimeAmountMinor")] public int LifetimeAmountMinor { get; set; }
+
+        [JsonProperty("purchaseCount")] public int PurchaseCount { get; set; }
+
+        /// &lt;summary&gt;
+        /// The offer this purchase was attributed to, or null. When
+        /// &lt;see cref="PurchaseOfferResult.StudioFulfils"/&gt; is true, deliver
+        /// &lt;see cref="PurchaseOfferResult.Contents"/&gt; yourself.
+        /// &lt;/summary&gt;
+        [JsonProperty("offer")] public PurchaseOfferResult? Offer { get; set; }
+    }
+
+    // ── Offers (docs/26) ──
+
+    /// &lt;summary&gt;
+    /// One offer instance for the active player
+    /// (&lt;c&gt;GET /sdk/v1/players/:p/offers&lt;/c&gt;). Pass &lt;see cref="InstanceId"/&gt;
+    /// as &lt;see cref="TrackPurchaseInput.OfferInstanceId"/&gt; when the player buys.
+    /// &lt;/summary&gt;
+    public sealed class Offer
+    {
+        [JsonProperty("instanceId")] public string InstanceId { get; set; } = string.Empty;
+        [JsonProperty("offerKey")] public string OfferKey { get; set; } = string.Empty;
+        /// &lt;summary&gt;&lt;c&gt;bundle&lt;/c&gt;, &lt;c&gt;starter_pack&lt;/c&gt;, &lt;c&gt;chain&lt;/c&gt;, &lt;c&gt;win_back&lt;/c&gt;, &lt;c&gt;revenge&lt;/c&gt;, &lt;c&gt;out_of_resource&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("kind")] public string Kind { get; set; } = string.Empty;
+        /// &lt;summary&gt;A string or a &lt;c&gt;{ locale: text }&lt;/c&gt; map.&lt;/summary&gt;
+        [JsonProperty("name")] public JToken? Name { get; set; }
+        [JsonProperty("description")] public JToken? Description { get; set; }
+        /// &lt;summary&gt;
+        /// &lt;c&gt;available&lt;/c&gt;, &lt;c&gt;shown&lt;/c&gt;, &lt;c&gt;pending_verification&lt;/c&gt;,
+        /// &lt;c&gt;purchased&lt;/c&gt;, &lt;c&gt;completed&lt;/c&gt;, &lt;c&gt;dismissed&lt;/c&gt;, &lt;c&gt;expired&lt;/c&gt;.
+        /// &lt;/summary&gt;
+        [JsonProperty("state")] public string State { get; set; } = string.Empty;
+        [JsonProperty("tier")] public int Tier { get; set; }
+        [JsonProperty("tierCount")] public int TierCount { get; set; }
+        /// &lt;summary&gt;What to sell now.&lt;/summary&gt;
+        [JsonProperty("current")] public OfferTier Current { get; set; } = new();
+        /// &lt;summary&gt;Chain offers: the next, still locked tier (a preview); null otherwise.&lt;/summary&gt;
+        [JsonProperty("next")] public OfferTier? Next { get; set; }
+        /// &lt;summary&gt;Server-anchored close time (ISO); the backstop before the first impression.&lt;/summary&gt;
+        [JsonProperty("expiresAt")] public string? ExpiresAt { get; set; }
+        /// &lt;summary&gt;Chain offers: when the current tier's timer runs out (ISO).&lt;/summary&gt;
+        [JsonProperty("tierExpiresAt")] public string? TierExpiresAt { get; set; }
+        /// &lt;summary&gt;The offer closes when the session ends.&lt;/summary&gt;
+        [JsonProperty("endsWithSession")] public bool EndsWithSession { get; set; }
+        [JsonProperty("purchasesRemaining")] public int? PurchasesRemaining { get; set; }
+        [JsonProperty("presentation")] public OfferPresentation Presentation { get; set; } = new();
+        /// &lt;summary&gt;
+        /// The A/B variant this player sees (&lt;see cref="Current"/&gt;, &lt;see cref="Next"/&gt;
+        /// and &lt;see cref="Presentation"/&gt; already reflect it), for your analytics;
+        /// null for the base configuration.
+        /// &lt;/summary&gt;
+        [JsonProperty("variantKey")] public string? VariantKey { get; set; }
+        /// &lt;summary&gt;
+        /// The linked event's key when the offer is event-linked (a sale while it
+        /// is live, or a post-event offer): show it on that event's screen. Null otherwise.
+        /// &lt;/summary&gt;
+        [JsonProperty("linkedEventKey")] public string? LinkedEventKey { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// One step of an &lt;see cref="Offer"/&gt;: sold through the store
+    /// (&lt;c&gt;Type == "paid"&lt;/c&gt;), or, on chain offers, claimed for free with
+    /// &lt;see cref="OffersClient.ClaimAsync"/&gt; (&lt;c&gt;Type == "free"&lt;/c&gt;, see
+    /// &lt;see cref="IsFree"/&gt;).
+    /// &lt;/summary&gt;
+    public sealed class OfferTier
+    {
+        [JsonProperty("index")] public int Index { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;paid&lt;/c&gt; or &lt;c&gt;free&lt;/c&gt;. Absent on older servers, which means paid.&lt;/summary&gt;
+        [JsonProperty("type", NullValueHandling = NullValueHandling.Ignore)] public string Type { get; set; } = "paid";
+        /// &lt;summary&gt;A free tier: claim it with &lt;see cref="OffersClient.ClaimAsync"/&gt;, never through a store.&lt;/summary&gt;
+        [JsonIgnore] public bool IsFree =&gt; Type == "free";
+        /// &lt;summary&gt;The store product key; empty for a free tier (the wire sends null).&lt;/summary&gt;
+        [JsonProperty("storeProductKey", NullValueHandling = NullValueHandling.Ignore)] public string StoreProductKey { get; set; } = string.Empty;
+        /// &lt;summary&gt;Store → SKU, e.g. &lt;c&gt;{ "google_play": "com.game.starter499" }&lt;/c&gt;. Sell the SKU of your store. Empty for a free tier.&lt;/summary&gt;
+        [JsonProperty("skus")] public Dictionary&lt;string, string&gt; Skus { get; set; } = new();
+        /// &lt;summary&gt;Reference USD price in cents (display fallback; the store price is what the player pays). 0 for a free tier.&lt;/summary&gt;
+        [JsonProperty("referencePriceMinor")] public int ReferencePriceMinor { get; set; }
+        /// &lt;summary&gt;Reward entries, e.g. &lt;c&gt;{ "type": "currency", "currencyKey": "gems", "amount": 500 }&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("contents")] public List&lt;Dictionary&lt;string, JToken&gt;&gt; Contents { get; set; } = new();
+        [JsonProperty("label")] public JToken? Label { get; set; }
+        [JsonProperty("valueLabel")] public string? ValueLabel { get; set; }
+    }
+
+    /// &lt;summary&gt;How the dashboard asked the offer to be drawn. All optional.&lt;/summary&gt;
+    public sealed class OfferPresentation
+    {
+        /// &lt;summary&gt;&lt;c&gt;popup&lt;/c&gt;, &lt;c&gt;banner&lt;/c&gt; or &lt;c&gt;store_tile&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("layout")] public string? Layout { get; set; }
+        [JsonProperty("badge")] public string? Badge { get; set; }
+        [JsonProperty("artKey")] public string? ArtKey { get; set; }
+    }
+
+    /// &lt;summary&gt;Result of &lt;see cref="OffersClient.MarkShownAsync"/&gt;.&lt;/summary&gt;
+    public sealed class OfferImpressionResult
+    {
+        [JsonProperty("offer")] public Offer Offer { get; set; } = new();
+        /// &lt;summary&gt;True for the impression that started the offer's timer.&lt;/summary&gt;
+        [JsonProperty("firstImpression")] public bool FirstImpression { get; set; }
+        /// &lt;summary&gt;
+        /// True when a cap refused this impression: don't show the offer.
+        /// Re-rendering an offer already shown this session is never refused by
+        /// the game-wide caps.
+        /// &lt;/summary&gt;
+        [JsonProperty("capped")] public bool Capped { get; set; }
+        /// &lt;summary&gt;
+        /// Why (&lt;see cref="Capped"/&gt; true), else null: &lt;c&gt;offer_cycle&lt;/c&gt;,
+        /// &lt;c&gt;offer_day&lt;/c&gt; (the offer's own caps), &lt;c&gt;global_session&lt;/c&gt;,
+        /// &lt;c&gt;global_day&lt;/c&gt;, &lt;c&gt;global_gap&lt;/c&gt; (the game-wide fatigue caps).
+        /// &lt;/summary&gt;
+        [JsonProperty("cappedReason")] public string? CappedReason { get; set; }
+        /// &lt;summary&gt;
+        /// When the same impression could succeed (ISO), when known:
+        /// &lt;c&gt;global_gap&lt;/c&gt; → the last impression + the gap; &lt;c&gt;global_day&lt;/c&gt; /
+        /// &lt;c&gt;offer_day&lt;/c&gt; → the next UTC midnight. Null otherwise.
+        /// &lt;/summary&gt;
+        [JsonProperty("retryAt")] public string? RetryAt { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// What &lt;see cref="OffersClient.TriggerAsync"/&gt; reports happened in the
+    /// game. Build one with &lt;see cref="FailEvent"/&gt;,
+    /// &lt;see cref="ResourceDepleted"/&gt; or &lt;see cref="LevelReached"/&gt;.
+    /// &lt;/summary&gt;
+    public sealed class OfferTriggerInput
+    {
+        /// &lt;summary&gt;&lt;c&gt;fail_event&lt;/c&gt;, &lt;c&gt;resource_depleted&lt;/c&gt; or &lt;c&gt;level_reached&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("type")] public string Type { get; set; } = string.Empty;
+        [JsonProperty("key")] public string? Key { get; set; }
+        [JsonProperty("consecutive")] public int? Consecutive { get; set; }
+        [JsonProperty("resource")] public string? Resource { get; set; }
+        [JsonProperty("required")] public int? Required { get; set; }
+        [JsonProperty("available")] public int? Available { get; set; }
+        [JsonProperty("secondsToRegen")] public int? SecondsToRegen { get; set; }
+        [JsonProperty("level")] public int? Level { get; set; }
+
+        /// &lt;summary&gt;
+        /// A fail (&lt;paramref name="key"/&gt;, e.g. &lt;c&gt;level_failed&lt;/c&gt;), with
+        /// &lt;paramref name="consecutive"/&gt; fails in a row including this one
+        /// (default 1). Arms revenge offers.
+        /// &lt;/summary&gt;
+        public static OfferTriggerInput FailEvent(string key, int? consecutive = null) =&gt;
+            new OfferTriggerInput { Type = "fail_event", Key = key, Consecutive = consecutive };
+
+        /// &lt;summary&gt;
+        /// The player tried an action needing &lt;paramref name="required"/&gt; of
+        /// &lt;paramref name="resource"/&gt; (a currency or item key) and has
+        /// &lt;paramref name="available"/&gt;; &lt;paramref name="secondsToRegen"/&gt; is
+        /// when a free refill arrives, if one does. Arms top-up offers.
+        /// &lt;/summary&gt;
+        public static OfferTriggerInput ResourceDepleted(string resource, int required, int available, int? secondsToRegen = null) =&gt;
+            new OfferTriggerInput
+            {
+                Type = "resource_depleted",
+                Resource = resource,
+                Required = required,
+                Available = available,
+                SecondsToRegen = secondsToRegen,
+            };
+
+        /// &lt;summary&gt;The player's level now.&lt;/summary&gt;
+        public static OfferTriggerInput LevelReached(int level) =&gt;
+            new OfferTriggerInput { Type = "level_reached", Level = level };
+    }
+
+    /// &lt;summary&gt;
+    /// One free chain tier claim (&lt;see cref="OfferClaimResult.Claim"/&gt;).
+    /// Exactly one of &lt;see cref="Granted"/&gt; / &lt;see cref="StudioFulfils"/&gt; is
+    /// true: when Kraty granted, the contents arrive as a grant; otherwise
+    /// deliver &lt;see cref="Contents"/&gt; yourself.
+    /// &lt;/summary&gt;
+    public sealed class OfferClaim
+    {
+        [JsonProperty("claimId")] public string ClaimId { get; set; } = string.Empty;
+        [JsonProperty("offerId")] public string OfferId { get; set; } = string.Empty;
+        [JsonProperty("offerKey")] public string OfferKey { get; set; } = string.Empty;
+        [JsonProperty("instanceId")] public string InstanceId { get; set; } = string.Empty;
+        [JsonProperty("tier")] public int Tier { get; set; }
+        [JsonProperty("contents")] public List&lt;Dictionary&lt;string, JToken&gt;&gt; Contents { get; set; } = new();
+        [JsonProperty("granted")] public bool Granted { get; set; }
+        [JsonProperty("grantId")] public string? GrantId { get; set; }
+        [JsonProperty("studioFulfils")] public bool StudioFulfils { get; set; }
+        [JsonProperty("claimedAt")] public string ClaimedAt { get; set; } = string.Empty;
+        /// &lt;summary&gt;The A/B variant whose contents were claimed; null for the base configuration.&lt;/summary&gt;
+        [JsonProperty("variantKey")] public string? VariantKey { get; set; }
+    }
+
+    /// &lt;summary&gt;Result of &lt;see cref="OffersClient.ClaimAsync"/&gt;: the claim and the offer after it.&lt;/summary&gt;
+    public sealed class OfferClaimResult
+    {
+        [JsonProperty("claim")] public OfferClaim Claim { get; set; } = new();
+        /// &lt;summary&gt;The next tier is current with a fresh timer, or the state is &lt;c&gt;completed&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("offer")] public Offer Offer { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;Result of &lt;see cref="OffersClient.TriggerAsync"/&gt;.&lt;/summary&gt;
+    public sealed class OfferTriggerResult
+    {
+        /// &lt;summary&gt;The offers this trigger armed that can be shown now; empty when none did.&lt;/summary&gt;
+        [JsonProperty("offers")] public List&lt;Offer&gt; Offers { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;The offer a purchase was attributed to (&lt;see cref="TrackPurchaseResult.Offer"/&gt;).&lt;/summary&gt;
+    public sealed class PurchaseOfferResult
+    {
+        [JsonProperty("offerId")] public string OfferId { get; set; } = string.Empty;
+        [JsonProperty("offerKey")] public string OfferKey { get; set; } = string.Empty;
+        [JsonProperty("instanceId")] public string? InstanceId { get; set; }
+        [JsonProperty("tier")] public int? Tier { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;explicit&lt;/c&gt;: the purchase carried &lt;c&gt;OfferInstanceId&lt;/c&gt;. &lt;c&gt;inferred&lt;/c&gt;: matched by SKU, revenue only.&lt;/summary&gt;
+        [JsonProperty("method")] public string Method { get; set; } = string.Empty;
+        /// &lt;summary&gt;&lt;c&gt;attributed&lt;/c&gt;, &lt;c&gt;pending_verification&lt;/c&gt;, &lt;c&gt;granted&lt;/c&gt;, &lt;c&gt;refused&lt;/c&gt;, &lt;c&gt;disputed&lt;/c&gt;, &lt;c&gt;failed&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = string.Empty;
+        /// &lt;summary&gt;The instance state after the purchase; null for inferred.&lt;/summary&gt;
+        [JsonProperty("state")] public string? State { get; set; }
+        /// &lt;summary&gt;Kraty granted the contents (they arrive as a grant).&lt;/summary&gt;
+        [JsonProperty("granted")] public bool Granted { get; set; }
+        /// &lt;summary&gt;Kraty will grant once a verified report of the purchase arrives.&lt;/summary&gt;
+        [JsonProperty("pendingVerification")] public bool PendingVerification { get; set; }
+        /// &lt;summary&gt;The game delivers &lt;see cref="Contents"/&gt; itself (the offer's default).&lt;/summary&gt;
+        [JsonProperty("studioFulfils")] public bool StudioFulfils { get; set; }
+        /// &lt;summary&gt;What the player bought (explicit only).&lt;/summary&gt;
+        [JsonProperty("contents")] public List&lt;Dictionary&lt;string, JToken&gt;&gt;? Contents { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;verified&lt;/c&gt;, &lt;c&gt;unverified&lt;/c&gt; or &lt;c&gt;skipped&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("validationStatus")] public string ValidationStatus { get; set; } = string.Empty;
+        /// &lt;summary&gt;The A/B variant whose price and contents were sold; null for the base configuration.&lt;/summary&gt;
+        [JsonProperty("variantKey")] public string? VariantKey { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Input for &lt;see cref="InventoryClient.ConsumeAsync"/&gt;. The server
+    /// requires &lt;see cref="IdempotencyKey"/&gt; for consume; the SDK
+    /// auto-generates one if you leave it null, matching the
+    /// auto-stamping behavior on every other POST endpoint.
+    /// &lt;/summary&gt;
+    public sealed class ConsumeItemInput
+    {
+        /// &lt;summary&gt;
+        /// Positive integer; the SDK does NOT enforce this, so the server
+        /// validates and returns 400 on zero / negative.
+        /// &lt;/summary&gt;
+        [JsonProperty("quantity")] public int Quantity { get; set; }
+
+        /// &lt;summary&gt;
+        /// Free-form tag persisted on the ledger row only. Surfaces in
+        /// the admin audit screen.
+        /// &lt;/summary&gt;
+        [JsonProperty("reason")] public string? Reason { get; set; }
+
+        /// &lt;summary&gt;Optional override; leave null to let the client auto-stamp one.&lt;/summary&gt;
+        [JsonProperty("idempotencyKey")] public string? IdempotencyKey { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Result of &lt;see cref="InventoryClient.ConsumeAsync"/&gt;.
+    /// &lt;see cref="Applied"/&gt; distinguishes a fresh mutation from an
+    /// idempotent replay (the server returns the prior state when the
+    /// same key arrives twice).
+    /// &lt;/summary&gt;
+    public sealed class ConsumeItemResult
+    {
+        [JsonProperty("itemKey")] public string ItemKey { get; set; } = string.Empty;
+        [JsonProperty("quantity")] public int Quantity { get; set; }
+        [JsonProperty("applied")] public bool Applied { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Input for &lt;see cref="WalletClient.DebitAsync"/&gt;. Same idempotency
+    /// story as &lt;see cref="ConsumeItemInput"/&gt;. Credits are intentionally
+    /// NOT in the SDK; only the studio's backend
+    /// (&lt;c&gt;/server/v1/...&lt;/c&gt;) can mint balance, so a client SDK that
+    /// exposed &lt;c&gt;credit&lt;/c&gt; would invite money printing.
+    /// &lt;/summary&gt;
+    public sealed class DebitWalletInput
+    {
+        [JsonProperty("amount")] public int Amount { get; set; }
+        [JsonProperty("reason")] public string? Reason { get; set; }
+        [JsonProperty("idempotencyKey")] public string? IdempotencyKey { get; set; }
+    }
+
+    public sealed class DebitWalletResult
+    {
+        [JsonProperty("economyKey")] public string EconomyKey { get; set; } = string.Empty;
+        [JsonProperty("balance")] public int Balance { get; set; }
+        [JsonProperty("applied")] public bool Applied { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Input for &lt;see cref="WalletClient.ProgressAsync"/&gt;. &lt;see cref="Amount"/&gt;
+    /// is SIGNED: positive advances, negative rolls back (the balance never
+    /// goes below zero).
+    /// &lt;/summary&gt;
+    public sealed class ProgressWalletInput
+    {
+        [JsonProperty("amount")] public int Amount { get; set; }
+        [JsonProperty("reason")] public string? Reason { get; set; }
+        [JsonProperty("idempotencyKey")] public string? IdempotencyKey { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// A progression item the platform recomputed as a consequence of a
+    /// &lt;see cref="WalletClient.ProgressAsync"/&gt; call — typically the player's
+    /// &lt;c&gt;level&lt;/c&gt; following their &lt;c&gt;xp&lt;/c&gt;. &lt;see cref="GrantIds"/&gt; are the
+    /// per-level rewards that fired; claim them with
+    /// &lt;see cref="GrantsClient.CollectAllAsync"/&gt;.
+    /// &lt;/summary&gt;
+    public sealed class DerivedProgressionChange
+    {
+        [JsonProperty("economyKey")] public string EconomyKey { get; set; } = string.Empty;
+        [JsonProperty("previous")] public int Previous { get; set; }
+        [JsonProperty("current")] public int Current { get; set; }
+        [JsonProperty("delta")] public int Delta { get; set; }
+        [JsonProperty("grantIds")] public List&lt;string&gt; GrantIds { get; set; } = new();
+    }
+
+    public sealed class ProgressWalletResult
+    {
+        [JsonProperty("economyKey")] public string EconomyKey { get; set; } = string.Empty;
+        [JsonProperty("balance")] public int Balance { get; set; }
+        [JsonProperty("applied")] public bool Applied { get; set; }
+        /// &lt;summary&gt;
+        /// Empty unless another progression item is configured to derive from
+        /// this one.
+        /// &lt;/summary&gt;
+        [JsonProperty("derived")] public List&lt;DerivedProgressionChange&gt; Derived { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// Trustworthy server clock, returned by
+    /// &lt;see cref="KratyClient.GetServerTimeAsync"/&gt;. Use it as an anti-cheat
+    /// time source: game timers (event countdowns, etc.) should be checked
+    /// against the server clock rather than the device clock, which a player
+    /// can trivially change to fake a still-running event. Compare
+    /// &lt;see cref="EpochMs"/&gt; against an event's &lt;c&gt;endsAt&lt;/c&gt;.
+    /// &lt;/summary&gt;
+    public sealed class ServerTime
+    {
+        /// &lt;summary&gt;
+        /// Unix epoch milliseconds (UTC). This is the value to compare against
+        /// event &lt;c&gt;endsAt&lt;/c&gt; — always compare with &lt;see cref="EpochMs"/&gt;, not
+        /// with &lt;see cref="Local"/&gt;.
+        /// &lt;/summary&gt;
+        [JsonProperty("epochMs")] public long EpochMs { get; set; }
+
+        /// &lt;summary&gt;UTC ISO-8601 string (e.g. &lt;c&gt;2027-01-15T08:00:00.000Z&lt;/c&gt;).&lt;/summary&gt;
+        [JsonProperty("iso")] public string Iso { get; set; } = string.Empty;
+
+        /// &lt;summary&gt;
+        /// IANA timezone the &lt;see cref="Local"/&gt; / &lt;see cref="OffsetMinutes"/&gt;
+        /// fields describe (&lt;c&gt;UTC&lt;/c&gt; unless a &lt;c&gt;timezone&lt;/c&gt; was requested).
+        /// &lt;/summary&gt;
+        [JsonProperty("timezone")] public string Timezone { get; set; } = "UTC";
+
+        /// &lt;summary&gt;&lt;see cref="Timezone"/&gt;'s offset from UTC at this instant, in minutes.&lt;/summary&gt;
+        [JsonProperty("offsetMinutes")] public int OffsetMinutes { get; set; }
+
+        /// &lt;summary&gt;
+        /// Wall-clock in &lt;see cref="Timezone"/&gt;, ISO-like without a zone suffix
+        /// (&lt;c&gt;YYYY-MM-DDTHH:mm:ss&lt;/c&gt;). Display only — always compare with
+        /// &lt;see cref="EpochMs"/&gt;.
+        /// &lt;/summary&gt;
+        [JsonProperty("local")] public string Local { get; set; } = string.Empty;
+    }
+
+    // ── Friends / social graph ───────────────────────────────────────────
+
+    /// &lt;summary&gt;
+    /// A confirmed friend, enriched with identity + live presence. Mirrors
+    /// the OpenAPI &lt;c&gt;Friend&lt;/c&gt; component. &lt;see cref="Online"/&gt; /
+    /// &lt;see cref="LastActiveAt"/&gt; / &lt;see cref="Status"/&gt; come from the
+    /// friend's heartbeat and are only fresh while they keep beating.
+    /// &lt;/summary&gt;
+    public sealed class Friend
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        /// &lt;summary&gt;ISO timestamp the friendship was established.&lt;/summary&gt;
+        [JsonProperty("friendsSince")] public string FriendsSince { get; set; } = string.Empty;
+        [JsonProperty("online")] public bool Online { get; set; }
+        /// &lt;summary&gt;ISO timestamp of their last heartbeat, or null when never/expired.&lt;/summary&gt;
+        [JsonProperty("lastActiveAt")] public string? LastActiveAt { get; set; }
+        /// &lt;summary&gt;Free-form client-set status ("in_match", "lobby", …), or null.&lt;/summary&gt;
+        [JsonProperty("status")] public string? Status { get; set; }
+        /// &lt;summary&gt;
+        /// Progression balances requested via the call's &lt;c&gt;progression&lt;/c&gt;
+        /// argument, e.g. &lt;c&gt;{ "level": 12 }&lt;/c&gt;. Null when none were asked
+        /// for; a resource the player never earned reads &lt;c&gt;0&lt;/c&gt;.
+        /// &lt;/summary&gt;
+        [JsonProperty("progression")] public Dictionary&lt;string, int&gt;? Progression { get; set; }
+        /// &lt;summary&gt;
+        /// ISO timestamp when this friend may be gifted again. Null means
+        /// "giftable now" (or the game has gifting turned off), so a UI can
+        /// treat a non-null value as "disable the gift button until then".
+        /// &lt;/summary&gt;
+        [JsonProperty("giftCooldownUntil")] public string? GiftCooldownUntil { get; set; }
+    }
+
+    /// &lt;summary&gt;The caller's shareable friend code + display identity.&lt;/summary&gt;
+    public sealed class FriendCode
+    {
+        /// &lt;summary&gt;Short, unambiguous, stable share code (e.g. &lt;c&gt;"K7F2QX"&lt;/c&gt;).&lt;/summary&gt;
+        [JsonProperty("friendCode")] public string Code { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        /// &lt;summary&gt;
+        /// The caller's OWN progression balances, when requested. Handy for a
+        /// profile card showing the share code and the player's level together.
+        /// &lt;/summary&gt;
+        [JsonProperty("progression")] public Dictionary&lt;string, int&gt;? Progression { get; set; }
+    }
+
+    /// &lt;summary&gt;The player's own presence after a heartbeat.&lt;/summary&gt;
+    public sealed class PlayerPresence
+    {
+        [JsonProperty("online")] public bool Online { get; set; }
+        [JsonProperty("lastActiveAt")] public string? LastActiveAt { get; set; }
+        [JsonProperty("status")] public string? Status { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// The other player on a &lt;see cref="FriendRequest"/&gt; (the requester on
+    /// an incoming request, the target on an outgoing one).
+    /// &lt;/summary&gt;
+    public sealed class FriendRequestPlayer
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        /// &lt;summary&gt;
+        /// Progression balances requested via the call's &lt;c&gt;progression&lt;/c&gt;
+        /// argument, e.g. &lt;c&gt;{ "level": 12 }&lt;/c&gt;. Null when none were asked
+        /// for; a resource the player never earned reads &lt;c&gt;0&lt;/c&gt;.
+        /// &lt;/summary&gt;
+        [JsonProperty("progression")] public Dictionary&lt;string, int&gt;? Progression { get; set; }
+    }
+
+    /// &lt;summary&gt;A pending friend request, incoming or outgoing.&lt;/summary&gt;
+    public sealed class FriendRequest
+    {
+        [JsonProperty("requestId")] public string RequestId { get; set; } = string.Empty;
+        /// &lt;summary&gt;One of &lt;c&gt;incoming&lt;/c&gt;, &lt;c&gt;outgoing&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("direction")] public string Direction { get; set; } = string.Empty;
+        [JsonProperty("player")] public FriendRequestPlayer Player { get; set; } = new();
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+    }
+
+    /// &lt;summary&gt;
+    /// Response from &lt;see cref="FriendsClient.ListRequestsAsync"/&gt;: the
+    /// caller's pending incoming + outgoing friend requests.
+    /// &lt;/summary&gt;
+    public sealed class FriendRequests
+    {
+        [JsonProperty("incoming")] public List&lt;FriendRequest&gt; Incoming { get; set; } = new();
+        [JsonProperty("outgoing")] public List&lt;FriendRequest&gt; Outgoing { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// A username-search hit + the caller's relationship to that player.
+    /// &lt;/summary&gt;
+    public sealed class FriendSearchResult
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        /// &lt;summary&gt;One of &lt;c&gt;none&lt;/c&gt;, &lt;c&gt;friends&lt;/c&gt;, &lt;c&gt;request_incoming&lt;/c&gt;, &lt;c&gt;request_outgoing&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("relationship")] public string Relationship { get; set; } = string.Empty;
+        /// &lt;summary&gt;
+        /// Progression balances requested via the call's &lt;c&gt;progression&lt;/c&gt;
+        /// argument, e.g. &lt;c&gt;{ "level": 12 }&lt;/c&gt;. Null when none were asked
+        /// for; a resource the player never earned reads &lt;c&gt;0&lt;/c&gt;.
+        /// &lt;/summary&gt;
+        [JsonProperty("progression")] public Dictionary&lt;string, int&gt;? Progression { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// A suggested player to add — a recently-active non-friend the caller
+    /// has no relationship with. Same identity + live-presence shape as
+    /// &lt;see cref="Friend"/&gt;, minus the friendship-specific
+    /// &lt;c&gt;FriendsSince&lt;/c&gt; / &lt;c&gt;GiftCooldownUntil&lt;/c&gt; (there's no edge yet).
+    /// Returned by &lt;see cref="FriendsClient.SuggestionsAsync"/&gt;.
+    /// &lt;/summary&gt;
+    public sealed class Suggestion
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        [JsonProperty("online")] public bool Online { get; set; }
+        /// &lt;summary&gt;ISO timestamp of their last heartbeat, or null when never/expired.&lt;/summary&gt;
+        [JsonProperty("lastActiveAt")] public string? LastActiveAt { get; set; }
+        /// &lt;summary&gt;Free-form client-set status ("in_match", "lobby", …), or null.&lt;/summary&gt;
+        [JsonProperty("status")] public string? Status { get; set; }
+        /// &lt;summary&gt;
+        /// Progression balances requested via the call's &lt;c&gt;progression&lt;/c&gt;
+        /// argument, e.g. &lt;c&gt;{ "level": 12 }&lt;/c&gt;. Null when none were asked
+        /// for; a resource the player never earned reads &lt;c&gt;0&lt;/c&gt;.
+        /// &lt;/summary&gt;
+        [JsonProperty("progression")] public Dictionary&lt;string, int&gt;? Progression { get; set; }
+    }
+
+    /// &lt;summary&gt;A player the caller has blocked.&lt;/summary&gt;
+    public sealed class BlockedPlayer
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        [JsonProperty("blockedAt")] public string BlockedAt { get; set; } = string.Empty;
+    }
+
+    /// &lt;summary&gt;
+    /// Result of &lt;see cref="FriendsClient.AddAsync"/&gt;: either a
+    /// newly-pending request (&lt;c&gt;Status == "pending"&lt;/c&gt;, see
+    /// &lt;see cref="Request"/&gt;), or an immediately-accepted friendship
+    /// (&lt;c&gt;Status == "accepted"&lt;/c&gt;, see &lt;see cref="Friend"/&gt;) when the
+    /// other player had already requested the caller (reciprocal
+    /// auto-accept).
+    /// &lt;/summary&gt;
+    public sealed class SendFriendRequestResult
+    {
+        /// &lt;summary&gt;One of &lt;c&gt;pending&lt;/c&gt;, &lt;c&gt;accepted&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = string.Empty;
+        /// &lt;summary&gt;Set when &lt;see cref="Status"/&gt; is &lt;c&gt;pending&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("request")] public FriendRequest? Request { get; set; }
+        /// &lt;summary&gt;Set when &lt;see cref="Status"/&gt; is &lt;c&gt;accepted&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("friend")] public Friend? Friend { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Add-or-block target for &lt;see cref="FriendsClient.AddAsync"/&gt; and
+    /// &lt;see cref="FriendsClient.BlockAsync"/&gt;: set exactly ONE of
+    /// &lt;see cref="FriendCode"/&gt; or &lt;see cref="ExternalPlayerId"/&gt;. Prefer
+    /// the &lt;see cref="ByCode"/&gt; / &lt;see cref="ByPlayerId"/&gt; factories.
+    /// &lt;/summary&gt;
+    public sealed class FriendTarget
+    {
+        /// &lt;summary&gt;A shareable friend code (from &lt;see cref="FriendsClient.GetCodeAsync"/&gt;).&lt;/summary&gt;
+        [JsonProperty("friendCode", NullValueHandling = NullValueHandling.Ignore)]
+        public string? FriendCode { get; set; }
+
+        /// &lt;summary&gt;The target player's external id.&lt;/summary&gt;
+        [JsonProperty("externalPlayerId", NullValueHandling = NullValueHandling.Ignore)]
+        public string? ExternalPlayerId { get; set; }
+
+        /// &lt;summary&gt;Target a player by their shareable friend code.&lt;/summary&gt;
+        public static FriendTarget ByCode(string friendCode) =&gt; new() { FriendCode = friendCode };
+
+        /// &lt;summary&gt;Target a player by their external id.&lt;/summary&gt;
+        public static FriendTarget ByPlayerId(string externalPlayerId) =&gt; new() { ExternalPlayerId = externalPlayerId };
+    }
+
+    // ── Friend gifting ───────────────────────────────────────────────────
+
+    /// &lt;summary&gt;
+    /// One entry of the studio's gifting allowlist, from
+    /// &lt;see cref="FriendsClient.GiftCatalogAsync"/&gt;. &lt;see cref="Type"/&gt; is
+    /// &lt;c&gt;"item"&lt;/c&gt; or &lt;c&gt;"currency"&lt;/c&gt; — the latter covers progression
+    /// items (XP, trophies) as well as spendable currencies, since both live
+    /// in one catalog table.
+    /// &lt;/summary&gt;
+    public sealed class GiftableResource
+    {
+        [JsonProperty("type")] public string Type { get; set; } = string.Empty;
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        /// &lt;summary&gt;Display name. A bare string, or a locale map when the
+        /// studio localizes its catalog; deserialized loosely for that reason.&lt;/summary&gt;
+        [JsonProperty("name")] public Newtonsoft.Json.Linq.JToken? Name { get; set; }
+        [JsonProperty("iconUrl")] public string? IconUrl { get; set; }
+        /// &lt;summary&gt;Economy rows only: &lt;c&gt;currency&lt;/c&gt; or &lt;c&gt;progression&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("economyKind")] public string? EconomyKind { get; set; }
+        /// &lt;summary&gt;Item rows only.&lt;/summary&gt;
+        [JsonProperty("rarity")] public string? Rarity { get; set; }
+        /// &lt;summary&gt;Largest amount one gift of this resource may carry.&lt;/summary&gt;
+        [JsonProperty("maxAmount")] public int MaxAmount { get; set; }
+        /// &lt;summary&gt;Whether sending debits the sender's own holdings.&lt;/summary&gt;
+        [JsonProperty("costsSender")] public bool CostsSender { get; set; }
+    }
+
+    /// &lt;summary&gt;The gifting allowlist plus the game's limits.&lt;/summary&gt;
+    public sealed class GiftCatalog
+    {
+        [JsonProperty("enabled")] public bool Enabled { get; set; }
+        /// &lt;summary&gt;Wait between two gifts to the SAME friend; 0 ⇒ no wait.&lt;/summary&gt;
+        [JsonProperty("cooldownSeconds")] public int CooldownSeconds { get; set; }
+        /// &lt;summary&gt;Rolling-24h cap across all friends; null ⇒ unlimited.&lt;/summary&gt;
+        [JsonProperty("dailySendLimit")] public int? DailySendLimit { get; set; }
+        /// &lt;summary&gt;Gifts the caller already sent inside that window.&lt;/summary&gt;
+        [JsonProperty("sentToday")] public int SentToday { get; set; }
+        [JsonProperty("resources")] public List&lt;GiftableResource&gt; Resources { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;A gift, from either side of the exchange.&lt;/summary&gt;
+    public sealed class Gift
+    {
+        [JsonProperty("giftId")] public string GiftId { get; set; } = string.Empty;
+        /// &lt;summary&gt;The grant delivering it; also claimable via the grants API.&lt;/summary&gt;
+        [JsonProperty("grantId")] public string GrantId { get; set; } = string.Empty;
+        /// &lt;summary&gt;One of &lt;c&gt;incoming&lt;/c&gt;, &lt;c&gt;outgoing&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("direction")] public string Direction { get; set; } = string.Empty;
+        /// &lt;summary&gt;The other party: sender for incoming, recipient for outgoing.&lt;/summary&gt;
+        [JsonProperty("player")] public GiftCounterparty? Player { get; set; }
+        /// &lt;summary&gt;One of &lt;c&gt;item&lt;/c&gt;, &lt;c&gt;currency&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("type")] public string Type { get; set; } = string.Empty;
+        [JsonProperty("resourceKey")] public string ResourceKey { get; set; } = string.Empty;
+        [JsonProperty("amount")] public int Amount { get; set; }
+        [JsonProperty("message")] public string? Message { get; set; }
+        /// &lt;summary&gt;Mirrors the delivering grant: &lt;c&gt;pending&lt;/c&gt; until claimed.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = string.Empty;
+        [JsonProperty("sentAt")] public string SentAt { get; set; } = string.Empty;
+        [JsonProperty("claimedAt")] public string? ClaimedAt { get; set; }
+        [JsonProperty("expiresAt")] public string? ExpiresAt { get; set; }
+    }
+
+    /// &lt;summary&gt;The other player on a gift.&lt;/summary&gt;
+    public sealed class GiftCounterparty
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// What to send and to whom, for &lt;see cref="FriendsClient.SendGiftAsync"/&gt;.
+    /// Set exactly one of &lt;see cref="FriendCode"/&gt; / &lt;see cref="ExternalPlayerId"/&gt;;
+    /// prefer the &lt;see cref="ToCode"/&gt; / &lt;see cref="ToPlayerId"/&gt; factories.
+    /// &lt;/summary&gt;
+    public sealed class SendGiftInput
+    {
+        [JsonProperty("friendCode", NullValueHandling = NullValueHandling.Ignore)]
+        public string? FriendCode { get; set; }
+
+        [JsonProperty("externalPlayerId", NullValueHandling = NullValueHandling.Ignore)]
+        public string? ExternalPlayerId { get; set; }
+
+        /// &lt;summary&gt;&lt;c&gt;"item"&lt;/c&gt; or &lt;c&gt;"currency"&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("type")] public string Type { get; set; } = string.Empty;
+
+        /// &lt;summary&gt;Must name a catalog row the studio flagged giftable.&lt;/summary&gt;
+        [JsonProperty("resourceKey")] public string ResourceKey { get; set; } = string.Empty;
+
+        [JsonProperty("amount")] public int Amount { get; set; }
+
+        /// &lt;summary&gt;Optional short note; trimmed to 140 chars server-side.&lt;/summary&gt;
+        [JsonProperty("message", NullValueHandling = NullValueHandling.Ignore)]
+        public string? Message { get; set; }
+
+        /// &lt;summary&gt;
+        /// Replay guard: a retry with the same key returns the original gift
+        /// instead of tripping the per-friend cooldown.
+        /// &lt;/summary&gt;
+        [JsonProperty("idempotencyKey", NullValueHandling = NullValueHandling.Ignore)]
+        public string? IdempotencyKey { get; set; }
+
+        /// &lt;summary&gt;Send to a friend addressed by their share code.&lt;/summary&gt;
+        public static SendGiftInput ToCode(string friendCode, string type, string resourceKey, int amount) =&gt;
+            new() { FriendCode = friendCode, Type = type, ResourceKey = resourceKey, Amount = amount };
+
+        /// &lt;summary&gt;Send to a friend addressed by their external id.&lt;/summary&gt;
+        public static SendGiftInput ToPlayerId(string externalPlayerId, string type, string resourceKey, int amount) =&gt;
+            new() { ExternalPlayerId = externalPlayerId, Type = type, ResourceKey = resourceKey, Amount = amount };
+    }
+
+    /// &lt;summary&gt;
+    /// Inventory list response wrapper; the backend nests the list
+    /// inside &lt;c&gt;{ "data": { "items": [...] } }&lt;/c&gt;.
+    /// &lt;/summary&gt;
+    internal sealed class InventoryListEnvelope
+    {
+        [JsonProperty("items")] public List&lt;PlayerItemHolding&gt;? Items { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Wallet list response wrapper; the backend nests the list
+    /// inside &lt;c&gt;{ "data": { "wallet": [...] } }&lt;/c&gt;.
+    /// &lt;/summary&gt;
+    internal sealed class WalletListEnvelope
+    {
+        [JsonProperty("wallet")] public List&lt;PlayerWalletHolding&gt;? Wallet { get; set; }
+    }
+
+    /// &lt;summary&gt;Wrapper for &lt;c&gt;{ "data": { "friends": [...] } }&lt;/c&gt;.&lt;/summary&gt;
+    internal sealed class FriendsListEnvelope
+    {
+        [JsonProperty("friends")] public List&lt;Friend&gt;? Friends { get; set; }
+    }
+
+    /// &lt;summary&gt;Wrapper for &lt;c&gt;{ "data": { "results": [...] } }&lt;/c&gt;.&lt;/summary&gt;
+    internal sealed class FriendSearchEnvelope
+    {
+        [JsonProperty("results")] public List&lt;FriendSearchResult&gt;? Results { get; set; }
+    }
+
+    /// &lt;summary&gt;Wrapper for &lt;c&gt;{ "data": { "suggestions": [...] } }&lt;/c&gt;.&lt;/summary&gt;
+    internal sealed class FriendSuggestionsEnvelope
+    {
+        [JsonProperty("suggestions")] public List&lt;Suggestion&gt;? Suggestions { get; set; }
+    }
+
+    /// &lt;summary&gt;Wrapper for &lt;c&gt;{ "data": { "friend": {...} } }&lt;/c&gt;.&lt;/summary&gt;
+    internal sealed class FriendEnvelope
+    {
+        [JsonProperty("friend")] public Friend? Friend { get; set; }
+    }
+
+    /// &lt;summary&gt;Wrapper for &lt;c&gt;{ "data": { "blocked": [...] } }&lt;/c&gt;.&lt;/summary&gt;
+    internal sealed class BlockedListEnvelope
+    {
+        [JsonProperty("blocked")] public List&lt;BlockedPlayer&gt;? Blocked { get; set; }
+    }
+
+    /// &lt;summary&gt;Wrapper for &lt;c&gt;{ "data": { "blocked": {...} } }&lt;/c&gt;.&lt;/summary&gt;
+    internal sealed class BlockEnvelope
+    {
+        [JsonProperty("blocked")] public BlockedPlayer? Blocked { get; set; }
+    }
+
+    /// &lt;summary&gt;Wrapper for &lt;c&gt;{ "data": { "gifts": [...] } }&lt;/c&gt;.&lt;/summary&gt;
+    internal sealed class GiftListEnvelope
+    {
+        [JsonProperty("gifts")] public List&lt;Gift&gt;? Gifts { get; set; }
+    }
+
+    /// &lt;summary&gt;Wrapper for &lt;c&gt;{ "data": { "gift": {...} } }&lt;/c&gt;.&lt;/summary&gt;
+    internal sealed class GiftEnvelope
+    {
+        [JsonProperty("gift")] public Gift? Gift { get; set; }
+    }
+
+    // ── Guilds (docs/25) ──────────────────────────────────────────────
+
+    /// &lt;summary&gt;Another player as guild screens show them.&lt;/summary&gt;
+    public sealed class GuildPlayerRef
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+    }
+
+    /// &lt;summary&gt;A guild card: search results, recommendations, board rows.&lt;/summary&gt;
+    public class GuildSummary
+    {
+        [JsonProperty("guildId")] public string GuildId { get; set; } = string.Empty;
+        [JsonProperty("name")] public string Name { get; set; } = string.Empty;
+        [JsonProperty("description")] public string? Description { get; set; }
+        /// &lt;summary&gt;Free-form key your game maps to emblem art.&lt;/summary&gt;
+        [JsonProperty("badge")] public string? Badge { get; set; }
+        /// &lt;summary&gt;ISO-3166-1 alpha-2 country code (&lt;c&gt;PT&lt;/c&gt;, &lt;c&gt;US&lt;/c&gt;), or null.&lt;/summary&gt;
+        [JsonProperty("country")] public string? Country { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;open&lt;/c&gt; or &lt;c&gt;request&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("joinType")] public string JoinType { get; set; } = "open";
+        [JsonProperty("memberCount")] public int MemberCount { get; set; }
+        /// &lt;summary&gt;The fixed Kraty limit (50).&lt;/summary&gt;
+        [JsonProperty("maxMembers")] public int MaxMembers { get; set; }
+        [JsonProperty("metadata")] public Dictionary&lt;string, JToken&gt; Metadata { get; set; } = new();
+        [JsonProperty("leader")] public GuildPlayerRef? Leader { get; set; }
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+    }
+
+    /// &lt;summary&gt;A recommended guild: &lt;see cref="FriendCount"/&gt; of your friends are in it.&lt;/summary&gt;
+    public sealed class RecommendedGuild : GuildSummary
+    {
+        [JsonProperty("friendCount")] public int FriendCount { get; set; }
+    }
+
+    /// &lt;summary&gt;One member of a guild roster.&lt;/summary&gt;
+    public sealed class GuildMember
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;leader&lt;/c&gt;, &lt;c&gt;co_leader&lt;/c&gt; or &lt;c&gt;member&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("role")] public string Role { get; set; } = "member";
+        [JsonProperty("joinedAt")] public string JoinedAt { get; set; } = string.Empty;
+        [JsonProperty("lastSeenAt")] public string? LastSeenAt { get; set; }
+        [JsonProperty("online")] public bool Online { get; set; }
+        /// &lt;summary&gt;Donations this member made in this guild this guild week.&lt;/summary&gt;
+        [JsonProperty("weeklyHelps")] public int WeeklyHelps { get; set; }
+    }
+
+    /// &lt;summary&gt;A guild with its roster (leader first, then co-leaders, members).&lt;/summary&gt;
+    public sealed class GuildDetail : GuildSummary
+    {
+        [JsonProperty("members")] public List&lt;GuildMember&gt; Members { get; set; } = new();
+    }
+
+    public sealed class GuildMembership
+    {
+        [JsonProperty("role")] public string Role { get; set; } = "member";
+        [JsonProperty("joinedAt")] public string JoinedAt { get; set; } = string.Empty;
+        /// &lt;summary&gt;What your role may do in this game (&lt;c&gt;kick&lt;/c&gt;, &lt;c&gt;promote&lt;/c&gt;, …).&lt;/summary&gt;
+        [JsonProperty("permissions")] public List&lt;string&gt; Permissions { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;Your guild, your role and permissions.&lt;/summary&gt;
+    public sealed class MyGuild
+    {
+        [JsonProperty("guild")] public GuildDetail Guild { get; set; } = new();
+        [JsonProperty("membership")] public GuildMembership Membership { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// The game's guild rules as this player sees them (unlock gate, cost,
+    /// roles, help settings, guild week). Kept as JSON objects for the nested
+    /// settings so new fields reach the game without an SDK update.
+    /// &lt;/summary&gt;
+    public sealed class GuildClientConfig
+    {
+        [JsonProperty("enabled")] public bool Enabled { get; set; }
+        [JsonProperty("maxMembers")] public int MaxMembers { get; set; }
+        [JsonProperty("defaultJoinType")] public string DefaultJoinType { get; set; } = "open";
+        [JsonProperty("roles")] public Dictionary&lt;string, List&lt;string&gt;&gt; Roles { get; set; } = new();
+        /// &lt;summary&gt;&lt;c&gt;{ active, itemKey, threshold, balance, eligible }&lt;/c&gt;; &lt;c&gt;active: false&lt;/c&gt; = no gate.&lt;/summary&gt;
+        [JsonProperty("unlock")] public JObject Unlock { get; set; } = new();
+        [JsonProperty("createCost")] public List&lt;JObject&gt; CreateCost { get; set; } = new();
+        /// &lt;summary&gt;
+        /// Who takes &lt;see cref="CreateCost"/&gt; and donor-paid help from the player:
+        /// &lt;c&gt;platform&lt;/c&gt; (Kraty debits it) or &lt;c&gt;studio&lt;/c&gt; (your game manages
+        /// inventory itself, so Kraty charges nothing and you charge the player).
+        /// &lt;/summary&gt;
+        [JsonProperty("costsChargedBy")] public string CostsChargedBy { get; set; } = "platform";
+        /// &lt;summary&gt;&lt;c&gt;{ declinedRetryHours, maxPendingPerPlayer, ttlHours }&lt;/c&gt;; an unanswered request expires &lt;c&gt;ttlHours&lt;/c&gt; after it was made.&lt;/summary&gt;
+        [JsonProperty("joinRequests")] public JObject JoinRequests { get; set; } = new();
+        [JsonProperty("leaveCooldownHours")] public int LeaveCooldownHours { get; set; }
+        [JsonProperty("kickRejoinBlockHours")] public int KickRejoinBlockHours { get; set; }
+        [JsonProperty("help")] public JObject Help { get; set; } = new();
+        /// &lt;summary&gt;The guild week &lt;c&gt;{ dayOfWeek, hour, minute, timezone, currentStart, currentEnd }&lt;/c&gt;; the weekly donation cap counts over it.&lt;/summary&gt;
+        [JsonProperty("week")] public JObject Week { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;A request to join a &lt;c&gt;request&lt;/c&gt;-type guild.&lt;/summary&gt;
+    public sealed class GuildJoinRequest
+    {
+        [JsonProperty("requestId")] public string RequestId { get; set; } = string.Empty;
+        [JsonProperty("guild")] public JObject Guild { get; set; } = new();
+        [JsonProperty("player")] public GuildPlayerRef? Player { get; set; }
+        [JsonProperty("message")] public string? Message { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;pending&lt;/c&gt;, &lt;c&gt;accepted&lt;/c&gt;, &lt;c&gt;declined&lt;/c&gt;, &lt;c&gt;cancelled&lt;/c&gt; or &lt;c&gt;expired&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = "pending";
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        [JsonProperty("decidedAt")] public string? DecidedAt { get; set; }
+    }
+
+    /// &lt;summary&gt;Joined an open guild (&lt;see cref="Guild"/&gt;), or a request is waiting (&lt;see cref="Request"/&gt;).&lt;/summary&gt;
+    public sealed class GuildJoinResult
+    {
+        /// &lt;summary&gt;&lt;c&gt;joined&lt;/c&gt; or &lt;c&gt;requested&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = string.Empty;
+        [JsonProperty("guild")] public MyGuild? Guild { get; set; }
+        [JsonProperty("request")] public GuildJoinRequest? Request { get; set; }
+    }
+
+    public sealed class GuildLeaveResult
+    {
+        [JsonProperty("guildId")] public string GuildId { get; set; } = string.Empty;
+        /// &lt;summary&gt;You were the last member: the guild is gone.&lt;/summary&gt;
+        [JsonProperty("disbanded")] public bool Disbanded { get; set; }
+        /// &lt;summary&gt;Who leads now, when you were the leader.&lt;/summary&gt;
+        [JsonProperty("newLeader")] public GuildPlayerRef? NewLeader { get; set; }
+    }
+
+    /// &lt;summary&gt;Input for &lt;c&gt;Guilds.CreateAsync&lt;/c&gt; / &lt;c&gt;UpdateProfileAsync&lt;/c&gt;; null fields are omitted.&lt;/summary&gt;
+    public sealed class GuildProfileInput
+    {
+        [JsonProperty("name", NullValueHandling = NullValueHandling.Ignore)] public string? Name { get; set; }
+        [JsonProperty("description", NullValueHandling = NullValueHandling.Ignore)] public string? Description { get; set; }
+        [JsonProperty("badge", NullValueHandling = NullValueHandling.Ignore)] public string? Badge { get; set; }
+        [JsonProperty("country", NullValueHandling = NullValueHandling.Ignore)] public string? Country { get; set; }
+        [JsonProperty("joinType", NullValueHandling = NullValueHandling.Ignore)] public string? JoinType { get; set; }
+        [JsonProperty("metadata", NullValueHandling = NullValueHandling.Ignore)] public Dictionary&lt;string, object?&gt;? Metadata { get; set; }
+    }
+
+    public sealed class GuildHelpRequest
+    {
+        [JsonProperty("requestId")] public string RequestId { get; set; } = string.Empty;
+        [JsonProperty("requester")] public GuildPlayerRef? Requester { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;item&lt;/c&gt; or &lt;c&gt;currency&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("type")] public string Type { get; set; } = "item";
+        [JsonProperty("resourceKey")] public string ResourceKey { get; set; } = string.Empty;
+        [JsonProperty("amountRequested")] public int AmountRequested { get; set; }
+        [JsonProperty("amountReceived")] public int AmountReceived { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;open&lt;/c&gt;, &lt;c&gt;filled&lt;/c&gt;, &lt;c&gt;cancelled&lt;/c&gt; or &lt;c&gt;expired&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = "open";
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        [JsonProperty("expiresAt")] public string ExpiresAt { get; set; } = string.Empty;
+        [JsonProperty("donatedByMe")] public bool DonatedByMe { get; set; }
+    }
+
+    public sealed class GuildHelpOverview
+    {
+        [JsonProperty("requests")] public List&lt;GuildHelpRequest&gt; Requests { get; set; } = new();
+        [JsonProperty("myRequest")] public GuildHelpRequest? MyRequest { get; set; }
+        /// &lt;summary&gt;When you may ask again (null = now).&lt;/summary&gt;
+        [JsonProperty("nextRequestAt")] public string? NextRequestAt { get; set; }
+        /// &lt;summary&gt;The weekly helps counter: &lt;c&gt;{ start, end, donationsMade, donationLimit }&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("week")] public JObject Week { get; set; } = new();
+    }
+
+    public sealed class GuildHelpDonation
+    {
+        [JsonProperty("donationId")] public string DonationId { get; set; } = string.Empty;
+        [JsonProperty("requestId")] public string RequestId { get; set; } = string.Empty;
+        [JsonProperty("amount")] public int Amount { get; set; }
+        [JsonProperty("grantId")] public string GrantId { get; set; } = string.Empty;
+        [JsonProperty("rewardGrantId")] public string? RewardGrantId { get; set; }
+        [JsonProperty("request")] public GuildHelpRequest Request { get; set; } = new();
+        [JsonProperty("week")] public JObject Week { get; set; } = new();
+    }
+
+    internal sealed class GuildListPayload&lt;T&gt;
+    {
+        [JsonProperty("guilds")] public List&lt;T&gt; Guilds { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;A page of &lt;c&gt;SearchPageAsync&lt;/c&gt; results.&lt;/summary&gt;
+    public sealed class GuildSearchPage
+    {
+        [JsonProperty("guilds")] public List&lt;GuildSummary&gt; Guilds { get; set; } = new();
+        /// &lt;summary&gt;Pass as &lt;c&gt;offset&lt;/c&gt; for the next page; null on the last page.&lt;/summary&gt;
+        [JsonProperty("nextOffset")] public int? NextOffset { get; set; }
+    }
+
+    internal sealed class GuildRequestsPayload
+    {
+        [JsonProperty("requests")] public List&lt;GuildJoinRequest&gt; Requests { get; set; } = new();
+    }
+
+    // ── Chat (docs/26) ────────────────────────────────────────────────
+
+    /// &lt;summary&gt;A player as chat shows them (sender, typing indicator, member).&lt;/summary&gt;
+    public class ChatPlayerRef
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        /// &lt;summary&gt;Name / avatar / country, or null when the player has none.&lt;/summary&gt;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+    }
+
+    /// &lt;summary&gt;The other player of a direct conversation.&lt;/summary&gt;
+    public sealed class ChatPeer : ChatPlayerRef
+    {
+        [JsonProperty("online")] public bool Online { get; set; }
+    }
+
+    /// &lt;summary&gt;One member of a group (or other explicit-membership) conversation.&lt;/summary&gt;
+    public sealed class ChatMember : ChatPlayerRef
+    {
+        /// &lt;summary&gt;&lt;c&gt;owner&lt;/c&gt;, &lt;c&gt;admin&lt;/c&gt; or &lt;c&gt;member&lt;/c&gt; in groups; the guild role in guild chat.&lt;/summary&gt;
+        [JsonProperty("role")] public string Role { get; set; } = "member";
+        [JsonProperty("joinedAt")] public string JoinedAt { get; set; } = string.Empty;
+        [JsonProperty("online")] public bool Online { get; set; }
+    }
+
+    /// &lt;summary&gt;Who wrote a message.&lt;/summary&gt;
+    public sealed class ChatMessageSender
+    {
+        /// &lt;summary&gt;&lt;c&gt;player&lt;/c&gt;, &lt;c&gt;server&lt;/c&gt; (your backend) or &lt;c&gt;system&lt;/c&gt; (Kraty).&lt;/summary&gt;
+        [JsonProperty("kind")] public string Kind { get; set; } = "player";
+        /// &lt;summary&gt;The player, when &lt;see cref="Kind"/&gt; is &lt;c&gt;player&lt;/c&gt;; null otherwise.&lt;/summary&gt;
+        [JsonProperty("player")] public ChatPlayerRef? Player { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// One chat message, its text already resolved for this viewer (the
+    /// profanity-filtered copy when the filter applies to them).
+    /// &lt;/summary&gt;
+    public sealed class ChatMessage
+    {
+        [JsonProperty("messageId")] public string MessageId { get; set; } = string.Empty;
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        /// &lt;summary&gt;Position in the conversation: gapless, ascending; the &lt;c&gt;before&lt;/c&gt; / &lt;c&gt;after&lt;/c&gt; cursor.&lt;/summary&gt;
+        [JsonProperty("seq")] public long Seq { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;text&lt;/c&gt;, &lt;c&gt;custom&lt;/c&gt; (a game card) or &lt;c&gt;system&lt;/c&gt; (Kraty-written). Treat as an open set.&lt;/summary&gt;
+        [JsonProperty("type")] public string Type { get; set; } = "text";
+        [JsonProperty("sender")] public ChatMessageSender Sender { get; set; } = new();
+        /// &lt;summary&gt;The text this viewer sees; null for a deleted message or a payload-only card. English fallback on &lt;c&gt;system&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("text")] public string? Text { get; set; }
+        /// &lt;summary&gt;&lt;see cref="Text"/&gt; is the profanity-filtered copy.&lt;/summary&gt;
+        [JsonProperty("filtered")] public bool Filtered { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;custom&lt;/c&gt;: your card type. &lt;c&gt;system&lt;/c&gt;: the event (&lt;c&gt;member_joined&lt;/c&gt;, &lt;c&gt;gift_sent&lt;/c&gt;, …).&lt;/summary&gt;
+        [JsonProperty("customType")] public string? CustomType { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;custom&lt;/c&gt;: the card payload. &lt;c&gt;system&lt;/c&gt;: the event's data. Null when deleted.&lt;/summary&gt;
+        [JsonProperty("payload")] public JToken? Payload { get; set; }
+        [JsonProperty("replyToId")] public string? ReplyToId { get; set; }
+        /// &lt;summary&gt;Echoed back to the sender only, to match a pending local message.&lt;/summary&gt;
+        [JsonProperty("clientMessageId")] public string? ClientMessageId { get; set; }
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        /// &lt;summary&gt;When the sender last edited it (ISO 8601); null = never edited.&lt;/summary&gt;
+        [JsonProperty("editedAt")] public string? EditedAt { get; set; }
+        [JsonProperty("deleted")] public bool Deleted { get; set; }
+    }
+
+    /// &lt;summary&gt;A posting gate on a progression item (level, trophies…).&lt;/summary&gt;
+    public sealed class ChatRequirement
+    {
+        [JsonProperty("itemKey")] public string ItemKey { get; set; } = string.Empty;
+        [JsonProperty("threshold")] public double Threshold { get; set; }
+    }
+
+    /// &lt;summary&gt;A public channel the studio defined (&lt;c&gt;global&lt;/c&gt;, &lt;c&gt;es&lt;/c&gt;, &lt;c&gt;trade&lt;/c&gt;…).&lt;/summary&gt;
+    public sealed class ChatChannel
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("name")] public string Name { get; set; } = string.Empty;
+        [JsonProperty("description")] public string? Description { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;players&lt;/c&gt; or &lt;c&gt;server_only&lt;/c&gt; (announcements).&lt;/summary&gt;
+        [JsonProperty("postPolicy")] public string PostPolicy { get; set; } = "players";
+        /// &lt;summary&gt;The channel's own cooldown; 0 = the channel kind's.&lt;/summary&gt;
+        [JsonProperty("slowModeSeconds")] public int SlowModeSeconds { get; set; }
+        /// &lt;summary&gt;
+        /// Seconds a player waits between two messages here: the larger of the
+        /// channel kind's and &lt;see cref="SlowModeSeconds"/&gt;, never under 15.
+        /// Sending sooner is refused with 429 &lt;c&gt;chat_slow_mode&lt;/c&gt;.
+        /// &lt;/summary&gt;
+        [JsonProperty("cooldownSeconds")] public int CooldownSeconds { get; set; } = 15;
+        /// &lt;summary&gt;Players per room; null = one room for everyone.&lt;/summary&gt;
+        [JsonProperty("roomSize")] public int? RoomSize { get; set; }
+        /// &lt;summary&gt;
+        /// The viewer's room (0-based). Big channels split into rooms, each its
+        /// own conversation; the server places players automatically and
+        /// stickily. Announcements reach every room.
+        /// &lt;/summary&gt;
+        [JsonProperty("room")] public int Room { get; set; }
+        /// &lt;summary&gt;Who may post (reading is open); null = everyone.&lt;/summary&gt;
+        [JsonProperty("requirement")] public ChatRequirement? Requirement { get; set; }
+        [JsonProperty("metadata")] public Dictionary&lt;string, JToken&gt; Metadata { get; set; } = new();
+        /// &lt;summary&gt;Only on &lt;see cref="ChatClientConfig.Channels"/&gt;: the channel's filter mode (&lt;c&gt;always&lt;/c&gt;, &lt;c&gt;on_by_default&lt;/c&gt;, &lt;c&gt;off_by_default&lt;/c&gt;).&lt;/summary&gt;
+        [JsonProperty("profanityFilter")] public string? ProfanityFilter { get; set; }
+    }
+
+    /// &lt;summary&gt;Why the viewer can't post in a conversation.&lt;/summary&gt;
+    public sealed class ChatPostDenied
+    {
+        [JsonProperty("code")] public string Code { get; set; } = string.Empty;
+        [JsonProperty("message")] public string Message { get; set; } = string.Empty;
+        [JsonProperty("details")] public JObject? Details { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// A conversation as the viewer sees it. &lt;see cref="Kind"/&gt; is an open set
+    /// (&lt;c&gt;direct&lt;/c&gt;, &lt;c&gt;group&lt;/c&gt;, &lt;c&gt;guild&lt;/c&gt;, &lt;c&gt;channel&lt;/c&gt;…).
+    /// &lt;/summary&gt;
+    public sealed class ChatConversation
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        [JsonProperty("kind")] public string Kind { get; set; } = string.Empty;
+        /// &lt;summary&gt;Group title, guild name, channel name; null for a direct conversation (show &lt;see cref="Peer"/&gt;).&lt;/summary&gt;
+        [JsonProperty("title")] public string? Title { get; set; }
+        [JsonProperty("metadata")] public Dictionary&lt;string, JToken&gt; Metadata { get; set; } = new();
+        [JsonProperty("memberCount")] public int MemberCount { get; set; }
+        [JsonProperty("lastSeq")] public long LastSeq { get; set; }
+        [JsonProperty("lastMessageAt")] public string? LastMessageAt { get; set; }
+        [JsonProperty("lastMessage")] public ChatMessage? LastMessage { get; set; }
+        [JsonProperty("unreadCount")] public int UnreadCount { get; set; }
+        [JsonProperty("lastReadSeq")] public long LastReadSeq { get; set; }
+        /// &lt;summary&gt;Notifications muted by the player until then (their choice, not a moderation mute).&lt;/summary&gt;
+        [JsonProperty("mutedUntil")] public string? MutedUntil { get; set; }
+        /// &lt;summary&gt;Direct conversations: the other player.&lt;/summary&gt;
+        [JsonProperty("peer")] public ChatPeer? Peer { get; set; }
+        /// &lt;summary&gt;Guild conversations: the guild.&lt;/summary&gt;
+        [JsonProperty("guildId")] public string? GuildId { get; set; }
+        /// &lt;summary&gt;Channel conversations: the channel definition.&lt;/summary&gt;
+        [JsonProperty("channel")] public ChatChannel? Channel { get; set; }
+        /// &lt;summary&gt;The viewer's role here (group / guild role), or null.&lt;/summary&gt;
+        [JsonProperty("role")] public string? Role { get; set; }
+        [JsonProperty("canPost")] public bool CanPost { get; set; }
+        /// &lt;summary&gt;Why the viewer can't post (blocked, friends only, requirement, announcements…).&lt;/summary&gt;
+        [JsonProperty("postDenied")] public ChatPostDenied? PostDenied { get; set; }
+        /// &lt;summary&gt;The viewer may delete other players' messages here.&lt;/summary&gt;
+        [JsonProperty("canModerate")] public bool CanModerate { get; set; }
+        /// &lt;summary&gt;The filter mode here: &lt;c&gt;always&lt;/c&gt;, &lt;c&gt;on_by_default&lt;/c&gt; or &lt;c&gt;off_by_default&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("filterMode")] public string FilterMode { get; set; } = string.Empty;
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        /// &lt;summary&gt;
+        /// The roster, on single-conversation reads of explicit-membership kinds
+        /// (groups); null on list reads and for guilds / channels / direct.
+        /// &lt;/summary&gt;
+        [JsonProperty("members")] public List&lt;ChatMember&gt;? Members { get; set; }
+    }
+
+    /// &lt;summary&gt;A page of the inbox.&lt;/summary&gt;
+    public sealed class ChatConversationPage
+    {
+        [JsonProperty("conversations")] public List&lt;ChatConversation&gt; Conversations { get; set; } = new();
+        /// &lt;summary&gt;Pass as &lt;c&gt;offset&lt;/c&gt; for the next page; null on the last page.&lt;/summary&gt;
+        [JsonProperty("nextOffset")] public int? NextOffset { get; set; }
+    }
+
+    /// &lt;summary&gt;A page of messages, oldest to newest.&lt;/summary&gt;
+    public sealed class ChatMessagePage
+    {
+        [JsonProperty("messages")] public List&lt;ChatMessage&gt; Messages { get; set; } = new();
+        /// &lt;summary&gt;More messages exist past this page in the direction you paged.&lt;/summary&gt;
+        [JsonProperty("hasMore")] public bool HasMore { get; set; }
+    }
+
+    /// &lt;summary&gt;Unread totals for a badge: muted conversations don't count.&lt;/summary&gt;
+    public sealed class ChatUnread
+    {
+        /// &lt;summary&gt;Unread messages across the inbox.&lt;/summary&gt;
+        [JsonProperty("total")] public int Total { get; set; }
+        /// &lt;summary&gt;Conversations with at least one unread message.&lt;/summary&gt;
+        [JsonProperty("conversations")] public int Conversations { get; set; }
+        /// &lt;summary&gt;Unread messages per conversation kind.&lt;/summary&gt;
+        [JsonProperty("byKind")] public Dictionary&lt;string, int&gt; ByKind { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;The player's saved chat choices.&lt;/summary&gt;
+    public sealed class ChatPreferences
+    {
+        /// &lt;summary&gt;Saved filter choice; null = each conversation kind's default.&lt;/summary&gt;
+        [JsonProperty("profanityFilter")] public bool? ProfanityFilter { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;everyone&lt;/c&gt;, &lt;c&gt;friends&lt;/c&gt; or &lt;c&gt;nobody&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("allowDirectFrom")] public string AllowDirectFrom { get; set; } = "everyone";
+    }
+
+    /// &lt;summary&gt;
+    /// Patch for &lt;c&gt;Chat.SetPreferencesAsync&lt;/c&gt;. Only the properties you
+    /// assign are sent; assigning &lt;see cref="ProfanityFilter"/&gt; = &lt;c&gt;null&lt;/c&gt;
+    /// clears the saved choice back to the kinds' defaults.
+    /// &lt;/summary&gt;
+    public sealed class ChatPreferencesUpdate
+    {
+        private bool? _profanityFilter;
+        internal bool HasProfanityFilter { get; private set; }
+
+        /// &lt;summary&gt;true / false, or null to clear (sent whenever assigned).&lt;/summary&gt;
+        public bool? ProfanityFilter
+        {
+            get =&gt; _profanityFilter;
+            set { _profanityFilter = value; HasProfanityFilter = true; }
+        }
+
+        /// &lt;summary&gt;&lt;c&gt;everyone&lt;/c&gt;, &lt;c&gt;friends&lt;/c&gt; or &lt;c&gt;nobody&lt;/c&gt;; null = unchanged.&lt;/summary&gt;
+        public string? AllowDirectFrom { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Patch for &lt;c&gt;Chat.SetConversationSettingsAsync&lt;/c&gt;. Only the properties
+    /// you assign are sent; assigning &lt;see cref="MutedUntil"/&gt; = &lt;c&gt;null&lt;/c&gt;
+    /// unmutes.
+    /// &lt;/summary&gt;
+    public sealed class ChatConversationSettings
+    {
+        private System.DateTimeOffset? _mutedUntil;
+        internal bool HasMutedUntil { get; private set; }
+
+        /// &lt;summary&gt;Mute notifications until then, or null to unmute (sent whenever assigned).&lt;/summary&gt;
+        public System.DateTimeOffset? MutedUntil
+        {
+            get =&gt; _mutedUntil;
+            set { _mutedUntil = value; HasMutedUntil = true; }
+        }
+
+        /// &lt;summary&gt;Hide the conversation from the inbox (it comes back on a new message); null = unchanged.&lt;/summary&gt;
+        public bool? Hidden { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// One conversation kind's settings in &lt;see cref="ChatClientConfig.Kinds"/&gt;.
+    /// The typed properties cover the built-in kinds; anything else lands in
+    /// &lt;see cref="Extra"/&gt;.
+    /// &lt;/summary&gt;
+    public sealed class ChatKindConfig
+    {
+        [JsonProperty("enabled")] public bool Enabled { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;always&lt;/c&gt;, &lt;c&gt;on_by_default&lt;/c&gt; or &lt;c&gt;off_by_default&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("profanityFilter")] public string ProfanityFilter { get; set; } = string.Empty;
+        /// &lt;summary&gt;Seconds a player waits between two messages in one conversation of this kind (at least 1; 15 for channels).&lt;/summary&gt;
+        [JsonProperty("cooldownSeconds")] public int CooldownSeconds { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;direct&lt;/c&gt;: &lt;c&gt;friends&lt;/c&gt; or &lt;c&gt;anyone&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("allowFrom")] public string? AllowFrom { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;group&lt;/c&gt;: most members one group may have.&lt;/summary&gt;
+        [JsonProperty("maxMembers")] public int? MaxMembers { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;group&lt;/c&gt;: most groups one player may belong to.&lt;/summary&gt;
+        [JsonProperty("maxGroupsPerPlayer")] public int? MaxGroupsPerPlayer { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;group&lt;/c&gt;: who can be added: &lt;c&gt;friends&lt;/c&gt; or &lt;c&gt;anyone&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("invitePolicy")] public string? InvitePolicy { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;guild&lt;/c&gt;: leaders and co-leaders may delete any message.&lt;/summary&gt;
+        [JsonProperty("officersCanDelete")] public bool? OfficersCanDelete { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;guild&lt;/c&gt;: Kraty posts system messages for joins, leaves, help requests.&lt;/summary&gt;
+        [JsonProperty("systemMessages")] public bool? SystemMessages { get; set; }
+        /// &lt;summary&gt;Settings this SDK version doesn't model.&lt;/summary&gt;
+        [JsonExtensionData] public IDictionary&lt;string, JToken&gt; Extra { get; set; } = new Dictionary&lt;string, JToken&gt;();
+    }
+
+    /// &lt;summary&gt;A game-defined card type for &lt;c&gt;Chat.SendCustomAsync&lt;/c&gt;.&lt;/summary&gt;
+    public sealed class ChatCustomType
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("description")] public string? Description { get; set; }
+        [JsonProperty("maxPayloadBytes")] public int MaxPayloadBytes { get; set; }
+        /// &lt;summary&gt;Optional JSON Schema the payload must match.&lt;/summary&gt;
+        [JsonProperty("schema")] public JToken? Schema { get; set; }
+    }
+
+    public sealed class ChatMessageRules
+    {
+        [JsonProperty("maxLength")] public int MaxLength { get; set; }
+        /// &lt;summary&gt;When false, links in text are masked.&lt;/summary&gt;
+        [JsonProperty("allowLinks")] public bool AllowLinks { get; set; }
+        [JsonProperty("customTypes")] public List&lt;ChatCustomType&gt; CustomTypes { get; set; } = new();
+        /// &lt;summary&gt;Seconds after sending during which a player may edit their message; 0 = editing off.&lt;/summary&gt;
+        [JsonProperty("editWindowSeconds")] public int EditWindowSeconds { get; set; }
+    }
+
+    public sealed class ChatRateLimit
+    {
+        [JsonProperty("messagesPerMinute")] public int MessagesPerMinute { get; set; }
+        /// &lt;summary&gt;The same text again in a conversation within this many seconds is refused (429 &lt;c&gt;chat_duplicate_message&lt;/c&gt;); 0 = off.&lt;/summary&gt;
+        [JsonProperty("duplicateWindowSeconds")] public int DuplicateWindowSeconds { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// The game's chat rules as this player sees them, plus their preferences
+    /// and moderation standing: build chat screens from this.
+    /// &lt;/summary&gt;
+    public sealed class ChatClientConfig
+    {
+        /// &lt;summary&gt;Per conversation kind (&lt;c&gt;direct&lt;/c&gt;, &lt;c&gt;group&lt;/c&gt;, &lt;c&gt;guild&lt;/c&gt;, &lt;c&gt;channel&lt;/c&gt;…).&lt;/summary&gt;
+        [JsonProperty("kinds")] public Dictionary&lt;string, ChatKindConfig&gt; Kinds { get; set; } = new();
+        /// &lt;summary&gt;The public channels (empty when channels are off).&lt;/summary&gt;
+        [JsonProperty("channels")] public List&lt;ChatChannel&gt; Channels { get; set; } = new();
+        [JsonProperty("messages")] public ChatMessageRules Messages { get; set; } = new();
+        [JsonProperty("rateLimit")] public ChatRateLimit RateLimit { get; set; } = new();
+        [JsonProperty("preferences")] public ChatPreferences Preferences { get; set; } = new();
+        [JsonProperty("status")] public ModerationStatus Status { get; set; } = new();
+    }
+
+    public sealed class ChatLeaveResult
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        [JsonProperty("left")] public bool Left { get; set; }
+    }
+
+    public sealed class ChatMemberRemoved
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        /// &lt;summary&gt;The removed player's external id.&lt;/summary&gt;
+        [JsonProperty("removed")] public string Removed { get; set; } = string.Empty;
+    }
+
+    public sealed class ChatMessageDeleted
+    {
+        [JsonProperty("messageId")] public string MessageId { get; set; } = string.Empty;
+        [JsonProperty("deleted")] public bool Deleted { get; set; }
+    }
+
+    public sealed class ChatReadResult
+    {
+        /// &lt;summary&gt;The read marker now stored (never moves backwards, capped at the conversation's last seq).&lt;/summary&gt;
+        [JsonProperty("lastReadSeq")] public long LastReadSeq { get; set; }
+    }
+
+    internal sealed class ChatChannelsPayload
+    {
+        [JsonProperty("channels")] public List&lt;ChatConversation&gt; Channels { get; set; } = new();
+    }
+
+    // ── Moderation (docs/26) ──────────────────────────────────────────
+
+    /// &lt;summary&gt;Report categories for &lt;c&gt;Moderation.ReportAsync&lt;/c&gt;.&lt;/summary&gt;
+    public static class ReportCategory
+    {
+        public const string Spam = "spam";
+        public const string Harassment = "harassment";
+        public const string HateSpeech = "hate_speech";
+        public const string SexualContent = "sexual_content";
+        public const string Violence = "violence";
+        public const string SelfHarm = "self_harm";
+        public const string Cheating = "cheating";
+        public const string Impersonation = "impersonation";
+        public const string InappropriateName = "inappropriate_name";
+        public const string Other = "other";
+    }
+
+    /// &lt;summary&gt;Where the reported behaviour happened.&lt;/summary&gt;
+    public static class ReportContext
+    {
+        public const string Chat = "chat";
+        public const string Profile = "profile";
+        public const string Guild = "guild";
+        public const string Gameplay = "gameplay";
+        public const string Other = "other";
+    }
+
+    /// &lt;summary&gt;A warning, chat mute or chat ban on the player.&lt;/summary&gt;
+    public sealed class Restriction
+    {
+        [JsonProperty("restrictionId")] public string RestrictionId { get; set; } = string.Empty;
+        /// &lt;summary&gt;&lt;c&gt;warning&lt;/c&gt;, &lt;c&gt;chat_mute&lt;/c&gt; or &lt;c&gt;chat_ban&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("kind")] public string Kind { get; set; } = string.Empty;
+        /// &lt;summary&gt;Shown to the player.&lt;/summary&gt;
+        [JsonProperty("reason")] public string? Reason { get; set; }
+        /// &lt;summary&gt;&lt;c&gt;moderator&lt;/c&gt;, &lt;c&gt;auto&lt;/c&gt; or &lt;c&gt;server&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("source")] public string Source { get; set; } = string.Empty;
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        /// &lt;summary&gt;null = no expiry (a warning until acknowledged, an indefinite chat ban).&lt;/summary&gt;
+        [JsonProperty("expiresAt")] public string? ExpiresAt { get; set; }
+        [JsonProperty("liftedAt")] public string? LiftedAt { get; set; }
+        [JsonProperty("acknowledgedAt")] public string? AcknowledgedAt { get; set; }
+        [JsonProperty("active")] public bool Active { get; set; }
+        [JsonProperty("reportId")] public string? ReportId { get; set; }
+    }
+
+    /// &lt;summary&gt;The player's standing: can they read and post in chat, and why not.&lt;/summary&gt;
+    public sealed class ModerationStatus
+    {
+        /// &lt;summary&gt;False while chat-banned (no reading or posting).&lt;/summary&gt;
+        [JsonProperty("canChat")] public bool CanChat { get; set; } = true;
+        /// &lt;summary&gt;False while chat-banned or muted.&lt;/summary&gt;
+        [JsonProperty("canPost")] public bool CanPost { get; set; } = true;
+        [JsonProperty("mutedUntil")] public string? MutedUntil { get; set; }
+        [JsonProperty("chatBannedUntil")] public string? ChatBannedUntil { get; set; }
+        /// &lt;summary&gt;In force now; warnings stay until acknowledged.&lt;/summary&gt;
+        [JsonProperty("restrictions")] public List&lt;Restriction&gt; Restrictions { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;A report this player filed. The reviewer's decision stays private.&lt;/summary&gt;
+    public sealed class MyReport
+    {
+        [JsonProperty("reportId")] public string ReportId { get; set; } = string.Empty;
+        [JsonProperty("targetExternalPlayerId")] public string TargetExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("category")] public string Category { get; set; } = string.Empty;
+        [JsonProperty("context")] public string Context { get; set; } = string.Empty;
+        /// &lt;summary&gt;&lt;c&gt;open&lt;/c&gt;, &lt;c&gt;resolved&lt;/c&gt; or &lt;c&gt;dismissed&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("status")] public string Status { get; set; } = "open";
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        [JsonProperty("updatedAt")] public string UpdatedAt { get; set; } = string.Empty;
+        [JsonProperty("resolvedAt")] public string? ResolvedAt { get; set; }
+    }
+
+    /// &lt;summary&gt;Input for &lt;c&gt;Moderation.ReportAsync&lt;/c&gt;; null fields are omitted.&lt;/summary&gt;
+    public sealed class ReportPlayerInput
+    {
+        [JsonProperty("targetExternalPlayerId")] public string TargetExternalPlayerId { get; set; } = string.Empty;
+        /// &lt;summary&gt;One of the &lt;see cref="ReportCategory"/&gt; values.&lt;/summary&gt;
+        [JsonProperty("category")] public string Category { get; set; } = ReportCategory.Other;
+        /// &lt;summary&gt;One of the &lt;see cref="ReportContext"/&gt; values; omitted = &lt;c&gt;other&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("context", NullValueHandling = NullValueHandling.Ignore)] public string? Context { get; set; }
+        /// &lt;summary&gt;The player's own words (up to the server's limit).&lt;/summary&gt;
+        [JsonProperty("comment", NullValueHandling = NullValueHandling.Ignore)] public string? Comment { get; set; }
+        /// &lt;summary&gt;The conversation the offending messages are in.&lt;/summary&gt;
+        [JsonProperty("conversationId", NullValueHandling = NullValueHandling.Ignore)] public string? ConversationId { get; set; }
+        /// &lt;summary&gt;The offending messages, attached as evidence.&lt;/summary&gt;
+        [JsonProperty("messageIds", NullValueHandling = NullValueHandling.Ignore)] public List&lt;string&gt;? MessageIds { get; set; }
+        [JsonProperty("guildId", NullValueHandling = NullValueHandling.Ignore)] public string? GuildId { get; set; }
+    }
+
+    internal sealed class MyReportsPayload
+    {
+        [JsonProperty("reports")] public List&lt;MyReport&gt; Reports { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;
+    /// Generic envelope: every successful SDK response is shaped as
+    /// &lt;c&gt;{ "data": T }&lt;/c&gt;. The client unwraps automatically.
+    /// &lt;/summary&gt;
+    internal sealed class DataEnvelope&lt;T&gt;
+    {
+        [JsonProperty("data")] public T? Data { get; set; }
+    }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

@@ -1,0 +1,437 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-unity/Runtime/Finalization/FinalizationTracker.cs</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-unity/Runtime/Finalization/FinalizationTracker.cs</h1><p class=muted>kraty-sdk-unity/Runtime/Finalization/FinalizationTracker.cs</p><pre><code class="language-csharp">#nullable enable
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+
+namespace Kraty
+{
+    // Client finalization catch-up; see docs/05b. Ported from the TS SDK
+    // reference (packages/client/sdk-typescript/src/finalization.ts).
+    //
+    // CORE INVARIANT: a finalization is recorded through EXACTLY ONE writer,
+    // ResolveFinalizedAsync. Both the live SSE `finalized` event AND
+    // CheckFinalizationsAsync route through it, so the SSE path persists
+    // Status=finalized + ReportedAt to the registry (not just fires the
+    // callback). Whichever path arrives first wins; the other no-ops on
+    // ReportedAt. That is what makes delivery exactly-once across live + catch-up.
+
+    /// &lt;summary&gt;The kind of board a membership refers to. Reference these
+    /// constants instead of hardcoding the wire strings,
+    /// e.g. &lt;c&gt;MembershipKind.EventLeaderboard&lt;/c&gt;, never &lt;c&gt;"event_leaderboard"&lt;/c&gt;.&lt;/summary&gt;
+    public static class MembershipKind
+    {
+        /// &lt;summary&gt;A per-event (or per-session) board a player is placed on.&lt;/summary&gt;
+        public const string EventLeaderboard = "event_leaderboard";
+        /// &lt;summary&gt;A recurring leaderboard (catch-up deferred; see docs/05b).&lt;/summary&gt;
+        public const string Leaderboard = "leaderboard";
+    }
+
+    /// &lt;summary&gt;Why a board finalized. The precise reasons come from the live SSE
+    /// stream; a catch-up read reports &lt;see cref="Finalized"/&gt; only when the
+    /// backend couldn't supply one.&lt;/summary&gt;
+    public static class FinalizationReason
+    {
+        /// &lt;summary&gt;A session/lobby inside an event terminated early.&lt;/summary&gt;
+        public const string SessionTerminated = "session_terminated";
+        /// &lt;summary&gt;The event window closed.&lt;/summary&gt;
+        public const string WindowClosed = "window_closed";
+        /// &lt;summary&gt;A recurring leaderboard rolled to a new period.&lt;/summary&gt;
+        public const string PeriodRolled = "period_rolled";
+        /// &lt;summary&gt;Ended, but the precise cause is unknown.&lt;/summary&gt;
+        public const string Finalized = "finalized";
+    }
+
+    /// &lt;summary&gt;Whether a final standing belongs to a real player or a bot.&lt;/summary&gt;
+    public static class StandingKind
+    {
+        public const string Player = "player";
+        public const string Bot = "bot";
+    }
+
+    /// &lt;summary&gt;A tracked board reference: either a per-event board (UUID) or a
+    /// configurable leaderboard (key + period).&lt;/summary&gt;
+    public sealed class MembershipRef
+    {
+        [JsonProperty("kind")] public string Kind { get; set; } = MembershipKind.EventLeaderboard;
+        [JsonProperty("leaderboardId")] public string? LeaderboardId { get; set; }
+        [JsonProperty("eventKey")] public string? EventKey { get; set; }
+        [JsonProperty("key")] public string? Key { get; set; }
+        [JsonProperty("period")] public string? Period { get; set; }
+
+        public static MembershipRef EventLeaderboard(string leaderboardId, string? eventKey = null) =&gt;
+            new() { Kind = MembershipKind.EventLeaderboard, LeaderboardId = leaderboardId, EventKey = eventKey };
+
+        public bool SameAs(MembershipRef o)
+        {
+            if (Kind != o.Kind) return false;
+            if (Kind == MembershipKind.EventLeaderboard) return LeaderboardId == o.LeaderboardId;
+            if (Kind == MembershipKind.Leaderboard) return Key == o.Key &amp;&amp; Period == o.Period;
+            return false;
+        }
+    }
+
+    public sealed class TrackedMembership
+    {
+        public const string StatusActive = "active";
+        public const string StatusFinalized = "finalized";
+
+        [JsonProperty("ref")] public MembershipRef Ref { get; set; } = new();
+        [JsonProperty("status")] public string Status { get; set; } = StatusActive;
+        [JsonProperty("joinedAt")] public string JoinedAt { get; set; } = string.Empty;
+        [JsonProperty("reportedAt")] public string? ReportedAt { get; set; }
+        [JsonProperty("label")] public string? Label { get; set; }
+    }
+
+    public sealed class FinalStanding
+    {
+        [JsonProperty("participantId")] public string ParticipantId { get; set; } = string.Empty;
+        [JsonProperty("rank")] public int Rank { get; set; }
+        [JsonProperty("score")] public double Score { get; set; }
+        [JsonProperty("name")] public string Name { get; set; } = string.Empty;
+        [JsonProperty("kind")] public string Kind { get; set; } = StandingKind.Player;
+        /// &lt;summary&gt;Avatar reference for this row, or null (bots / unset).
+        /// Populated when the standings came from a board read (the normal
+        /// path); may be null on the rare live-broadcast fallback.&lt;/summary&gt;
+        [JsonProperty("avatar")] public string? Avatar { get; set; }
+        /// &lt;summary&gt;True for the row belonging to the player who received this
+        /// result — use it to highlight "you" without matching ids yourself.
+        /// Server-resolved on the board read; false on the live-broadcast
+        /// fallback.&lt;/summary&gt;
+        [JsonProperty("isSelf")] public bool IsSelf { get; set; }
+    }
+
+    public sealed class SelfEntry
+    {
+        public int Rank { get; }
+        public double Score { get; }
+        public SelfEntry(int rank, double score) { Rank = rank; Score = score; }
+    }
+
+    public sealed class FinalizationResult
+    {
+        public MembershipRef Ref { get; set; } = new();
+        /// &lt;summary&gt;One of the &lt;see cref="FinalizationReason"/&gt; constants.&lt;/summary&gt;
+        public string Reason { get; set; } = FinalizationReason.Finalized;
+        public SelfEntry? Self { get; set; }
+        public IReadOnlyList&lt;FinalStanding&gt;? Standings { get; set; }
+        public string? EventKey { get; set; }
+    }
+
+    /// &lt;summary&gt;Board-status probe result the tracker asks the client for.
+    /// &lt;c&gt;Reason&lt;/c&gt; is one of the &lt;see cref="FinalizationReason"/&gt;
+    /// constants, or null when the backend didn't supply one.&lt;/summary&gt;
+    public sealed class EventLeaderboardStatus
+    {
+        public bool Finalized { get; }
+        public string? Reason { get; }
+        public SelfEntry? Self { get; }
+        /// &lt;summary&gt;The board's final rows (server-resolved: avatar + isSelf per
+        /// row), so a finalization can be rendered without a second fetch. Null
+        /// when the read couldn't return them.&lt;/summary&gt;
+        public IReadOnlyList&lt;FinalStanding&gt;? Standings { get; }
+        public EventLeaderboardStatus(bool finalized, string? reason, SelfEntry? self, IReadOnlyList&lt;FinalStanding&gt;? standings = null)
+        {
+            Finalized = finalized;
+            Reason = reason;
+            Self = self;
+            Standings = standings;
+        }
+    }
+
+    /// &lt;summary&gt;Persisted membership registry, keyed per active player.&lt;/summary&gt;
+    public interface IMembershipStore
+    {
+        Task&lt;List&lt;TrackedMembership&gt;&gt; LoadAsync(string playerId, CancellationToken ct = default);
+        Task SaveAsync(string playerId, List&lt;TrackedMembership&gt; entries, CancellationToken ct = default);
+    }
+
+    /// &lt;summary&gt;Volatile, process-local. Catch-up won't survive a restart.&lt;/summary&gt;
+    public sealed class InMemoryMembershipStore : IMembershipStore
+    {
+        private readonly Dictionary&lt;string, string&gt; _byPlayer = new();
+        private readonly object _gate = new();
+
+        public Task&lt;List&lt;TrackedMembership&gt;&gt; LoadAsync(string playerId, CancellationToken ct = default)
+        {
+            lock (_gate)
+            {
+                var json = _byPlayer.TryGetValue(playerId, out var v) ? v : null;
+                return Task.FromResult(Deserialize(json));
+            }
+        }
+
+        public Task SaveAsync(string playerId, List&lt;TrackedMembership&gt; entries, CancellationToken ct = default)
+        {
+            lock (_gate) { _byPlayer[playerId] = JsonConvert.SerializeObject(entries); }
+            return Task.CompletedTask;
+        }
+
+        internal static List&lt;TrackedMembership&gt; Deserialize(string? json) =&gt;
+            string.IsNullOrEmpty(json)
+                ? new List&lt;TrackedMembership&gt;()
+                : JsonConvert.DeserializeObject&lt;List&lt;TrackedMembership&gt;&gt;(json!) ?? new List&lt;TrackedMembership&gt;();
+    }
+
+#if UNITY_5_3_OR_NEWER
+    /// &lt;summary&gt;Unity store backed by PlayerPrefs (main-thread marshalled).&lt;/summary&gt;
+    public sealed class PlayerPrefsMembershipStore : IMembershipStore
+    {
+        private readonly string _keyPrefix;
+        private readonly SynchronizationContext? _mainThread;
+
+        public PlayerPrefsMembershipStore(string keyPrefix = "kraty.memberships.")
+        {
+            _keyPrefix = keyPrefix;
+            _mainThread = SynchronizationContext.Current;
+        }
+
+        private Task&lt;T&gt; OnMainThread&lt;T&gt;(Func&lt;T&gt; func)
+        {
+            if (_mainThread == null || _mainThread == SynchronizationContext.Current)
+                return Task.FromResult(func());
+            var tcs = new TaskCompletionSource&lt;T&gt;();
+            _mainThread.Post(_ =&gt;
+            {
+                try { tcs.SetResult(func()); }
+                catch (Exception e) { tcs.SetException(e); }
+            }, null);
+            return tcs.Task;
+        }
+
+        public Task&lt;List&lt;TrackedMembership&gt;&gt; LoadAsync(string playerId, CancellationToken ct = default) =&gt;
+            OnMainThread(() =&gt;
+            {
+                var key = _keyPrefix + playerId;
+                var json = UnityEngine.PlayerPrefs.HasKey(key) ? UnityEngine.PlayerPrefs.GetString(key) : null;
+                return InMemoryMembershipStore.Deserialize(json);
+            });
+
+        public Task SaveAsync(string playerId, List&lt;TrackedMembership&gt; entries, CancellationToken ct = default) =&gt;
+            OnMainThread&lt;object?&gt;(() =&gt;
+            {
+                UnityEngine.PlayerPrefs.SetString(_keyPrefix + playerId, JsonConvert.SerializeObject(entries));
+                UnityEngine.PlayerPrefs.Save();
+                return null;
+            });
+    }
+#endif
+
+    public sealed class FinalizationTracker
+    {
+        private readonly IMembershipStore _store;
+        private readonly Func&lt;Task&lt;string?&gt;&gt; _getActivePlayerId;
+        private readonly Func&lt;string, Task&lt;EventLeaderboardStatus?&gt;&gt; _readEventLeaderboard;
+        private readonly TimeSpan _pruneAfter;
+        private readonly List&lt;Action&lt;FinalizationResult&gt;&gt; _listeners = new();
+        // Serializes all registry read-modify-write so a live SSE event and a
+        // CheckFinalizationsAsync poll can't both pass the ReportedAt guard.
+        private readonly SemaphoreSlim _gate = new(1, 1);
+
+        public FinalizationTracker(
+            IMembershipStore store,
+            Func&lt;Task&lt;string?&gt;&gt; getActivePlayerId,
+            Func&lt;string, Task&lt;EventLeaderboardStatus?&gt;&gt; readEventLeaderboard,
+            TimeSpan? pruneAfter = null)
+        {
+            _store = store;
+            _getActivePlayerId = getActivePlayerId;
+            _readEventLeaderboard = readEventLeaderboard;
+            _pruneAfter = pruneAfter ?? TimeSpan.FromDays(7);
+        }
+
+        /// &lt;summary&gt;Register a finalization handler. Returns an unsubscribe action.&lt;/summary&gt;
+        public Action OnFinalized(Action&lt;FinalizationResult&gt; cb)
+        {
+            lock (_listeners) { _listeners.Add(cb); }
+            return () =&gt; { lock (_listeners) { _listeners.Remove(cb); } };
+        }
+
+        /// &lt;summary&gt;Record that the player joined a board (idempotent upsert).&lt;/summary&gt;
+        public async Task TrackAsync(MembershipRef @ref, string? label = null)
+        {
+            var playerId = await _getActivePlayerId().ConfigureAwait(false);
+            if (playerId == null) return;
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var entries = Prune(await _store.LoadAsync(playerId).ConfigureAwait(false));
+                if (!entries.Any(e =&gt; e.Ref.SameAs(@ref)))
+                {
+                    entries.Add(new TrackedMembership
+                    {
+                        Ref = @ref,
+                        Status = TrackedMembership.StatusActive,
+                        JoinedAt = DateTime.UtcNow.ToString("o"),
+                        Label = label,
+                    });
+                }
+                await _store.SaveAsync(playerId, entries).ConfigureAwait(false);
+            }
+            finally { _gate.Release(); }
+        }
+
+        // The SINGLE writer. Persists status + reportedAt THEN fires the
+        // callback. Returns true iff this call resolved the entry. Assumes the
+        // caller does NOT hold _gate.
+        private async Task&lt;bool&gt; ResolveFinalizedAsync(string playerId, MembershipRef @ref, FinalizationResult result)
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var entries = await _store.LoadAsync(playerId).ConfigureAwait(false);
+                var entry = entries.FirstOrDefault(e =&gt; e.Ref.SameAs(@ref));
+                if (entry == null || entry.ReportedAt != null) return false;
+                entry.Status = TrackedMembership.StatusFinalized;
+                entry.ReportedAt = DateTime.UtcNow.ToString("o");
+                // Carry the TRACKED ref onto the result. It holds the eventKey
+                // captured at Start (Resources.StartAsync tracks
+                // EventLeaderboard(leaderboardId, eventKey)) plus the canonical
+                // board ref. The live SSE path builds a bare ref (leaderboardId
+                // only) and never sets EventKey, so without this a stream-
+                // delivered result has result.EventKey == null / Ref.EventKey ==
+                // null and a caller that `switch`es on EventKey can't route it.
+                // Catch-up already sets EventKey; doing it here makes BOTH paths
+                // consistent (single writer).
+                result.Ref = entry.Ref;
+                if (string.IsNullOrEmpty(result.EventKey)) result.EventKey = entry.Ref.EventKey;
+                await _store.SaveAsync(playerId, entries).ConfigureAwait(false); // persist BEFORE firing
+                Emit(result);
+                return true;
+            }
+            finally { _gate.Release(); }
+        }
+
+        /// &lt;summary&gt;Live SSE path: a `finalized` event arrived. Routes through the
+        /// same writer as catch-up; persists to the registry AND fires.&lt;/summary&gt;
+        public async Task OnStreamFinalizedAsync(string leaderboardId, IDictionary&lt;string, Newtonsoft.Json.Linq.JToken&gt;? data)
+        {
+            var playerId = await _getActivePlayerId().ConfigureAwait(false);
+            if (playerId == null) return;
+            var reasonRaw = data != null &amp;&amp; data.TryGetValue("reason", out var r) ? r?.ToString() : null;
+            var reason = reasonRaw == FinalizationReason.SessionTerminated || reasonRaw == FinalizationReason.WindowClosed
+                ? reasonRaw
+                : FinalizationReason.Finalized;
+            var @ref = MembershipRef.EventLeaderboard(leaderboardId);
+            // The live `finalized` frame is a board-wide BROADCAST, so it can't
+            // carry this viewer's `self` or per-row `isSelf`. Enrich with one
+            // per-player board read so the result carries server-resolved
+            // standings (avatar + isSelf) and the caller's self entry. Falls
+            // back to the broadcast standings (no isSelf) if the read is
+            // unavailable — delivery still happens either way.
+            EventLeaderboardStatus? read;
+            try { read = await _readEventLeaderboard(leaderboardId).ConfigureAwait(false); }
+            catch { read = null; }
+            var standings = read?.Standings ?? ExtractBroadcastStandings(data);
+            await ResolveFinalizedAsync(playerId, @ref, new FinalizationResult
+            {
+                Ref = @ref,
+                Reason = reason, // keep the precise SSE reason over the read's
+                Self = read?.Self,
+                Standings = standings,
+            }).ConfigureAwait(false);
+        }
+
+        // Parse the board-wide `standings` array off the live broadcast frame,
+        // used only as a fallback when the per-player board read is unavailable.
+        // Rows from here have no per-viewer `isSelf`. Returns null when absent
+        // or unparseable.
+        private static IReadOnlyList&lt;FinalStanding&gt;? ExtractBroadcastStandings(IDictionary&lt;string, Newtonsoft.Json.Linq.JToken&gt;? data)
+        {
+            if (data == null || !data.TryGetValue("standings", out var token) || token == null) return null;
+            try { return token.ToObject&lt;List&lt;FinalStanding&gt;&gt;(); }
+            catch { return null; }
+        }
+
+        /// &lt;summary&gt;Catch-up path: poll still-active tracked boards and report any
+        /// that finalized while away (through the same writer). Returns the new ones.&lt;/summary&gt;
+        public async Task&lt;List&lt;FinalizationResult&gt;&gt; CheckFinalizationsAsync()
+        {
+            var playerId = await _getActivePlayerId().ConfigureAwait(false);
+            var outResults = new List&lt;FinalizationResult&gt;();
+            if (playerId == null) return outResults;
+            List&lt;TrackedMembership&gt; active;
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try { active = (await _store.LoadAsync(playerId).ConfigureAwait(false)).Where(e =&gt; e.Status == TrackedMembership.StatusActive).ToList(); }
+            finally { _gate.Release(); }
+
+            foreach (var e in active)
+            {
+                if (e.Ref.Kind != MembershipKind.EventLeaderboard || e.Ref.LeaderboardId == null) continue; // leaderboard: see docs/05b (deferred)
+                var status = await _readEventLeaderboard(e.Ref.LeaderboardId).ConfigureAwait(false);
+                if (status == null || !status.Finalized) continue;
+                var result = new FinalizationResult
+                {
+                    Ref = e.Ref,
+                    // The board now persists WHY it finalized, so a catch-up read can
+                    // tell a terminated session from a closed window. Finalized is
+                    // only the fallback if the backend didn't supply a reason.
+                    Reason = status.Reason ?? FinalizationReason.Finalized,
+                    Self = status.Self,
+                    Standings = status.Standings,
+                    EventKey = e.Ref.EventKey,
+                };
+                if (await ResolveFinalizedAsync(playerId, e.Ref, result).ConfigureAwait(false))
+                    outResults.Add(result);
+            }
+            return outResults;
+        }
+
+        /// &lt;summary&gt;Acknowledge a handled finalization: drop it from the registry.&lt;/summary&gt;
+        public async Task DismissAsync(MembershipRef @ref)
+        {
+            var playerId = await _getActivePlayerId().ConfigureAwait(false);
+            if (playerId == null) return;
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var entries = await _store.LoadAsync(playerId).ConfigureAwait(false);
+                var kept = entries.Where(e =&gt; !e.Ref.SameAs(@ref)).ToList();
+                if (kept.Count != entries.Count) await _store.SaveAsync(playerId, kept).ConfigureAwait(false);
+            }
+            finally { _gate.Release(); }
+        }
+
+        /// &lt;summary&gt;Bulk-drop every already-reported membership. Returns the count.&lt;/summary&gt;
+        public async Task&lt;int&gt; ClearReportedAsync()
+        {
+            var playerId = await _getActivePlayerId().ConfigureAwait(false);
+            if (playerId == null) return 0;
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var entries = await _store.LoadAsync(playerId).ConfigureAwait(false);
+                var kept = entries.Where(e =&gt; e.ReportedAt == null).ToList();
+                if (kept.Count != entries.Count) await _store.SaveAsync(playerId, kept).ConfigureAwait(false);
+                return entries.Count - kept.Count;
+            }
+            finally { _gate.Release(); }
+        }
+
+        private List&lt;TrackedMembership&gt; Prune(List&lt;TrackedMembership&gt; entries)
+        {
+            var cutoff = DateTime.UtcNow - _pruneAfter;
+            return entries.Where(e =&gt;
+            {
+                var stamp = e.ReportedAt ?? e.JoinedAt;
+                return !DateTime.TryParse(stamp, null, System.Globalization.DateTimeStyles.RoundtripKind, out var ts) || ts &gt;= cutoff;
+            }).ToList();
+        }
+
+        private void Emit(FinalizationResult result)
+        {
+            Action&lt;FinalizationResult&gt;[] snapshot;
+            lock (_listeners) { snapshot = _listeners.ToArray(); }
+            foreach (var l in snapshot)
+            {
+                try { l(result); }
+                catch { /* a listener throwing must not break the writer */ }
+            }
+        }
+    }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

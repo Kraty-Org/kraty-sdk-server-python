@@ -1,0 +1,392 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-flutter/SCHEMA.md</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-flutter/SCHEMA.md</h1><p class=muted>kraty-sdk-flutter/SCHEMA.md</p><pre><code class="language-markdown"># Kraty Flutter SDK: public surface (v0.6.0)
+
+Canonical method + type listing for `kraty` (Dart package). Update this
+file in the same commit as any signature change.
+
+All methods sit on the `Kraty` facade unless noted. Every async method
+returns a `Future`. The optional `as` field on resource calls is for
+server-side tooling.
+
+## `Kraty` facade
+
+```dart
+Kraty(KratyClientOptions options)
+
+String? get activeExternalPlayerId
+Future&lt;(String externalPlayerId, String secret)&gt; ensureIdentity()
+Future&lt;void&gt; signIn(String externalPlayerId, String secret)
+Future&lt;void&gt; logout()
+Future&lt;void&gt; close()  // dispose resources
+
+// Finalization catch-up (docs/05b). Fires exactly once per board across the
+// live SSE `finalized` event AND boards that ended while the player was away.
+void Function() onFinalized(FinalizationListener cb)      // returns unsubscribe
+Future&lt;List&lt;FinalizationResult&gt;&gt; checkFinalizations()     // call on app foreground/reconnect
+Future&lt;void&gt; dismiss(MembershipRef ref)                   // ack one handled result
+Future&lt;int&gt; clearReported()                               // bulk-drop delivered entries
+```
+
+`FinalizationResult` = `{ MembershipRef ref; String reason; SelfEntry? self; List&lt;FinalStanding&gt;? standings; String? eventKey }`; `reason` uses the `FinalizationReason` consts (`sessionTerminated` \| `windowClosed` \| `periodRolled` \| `finalized`). Registry persistence is injectable via `KratyClientOptions.membershipStore` (`SharedPreferencesMembershipStore` in Flutter, `InMemoryMembershipStore` in pure-Dart).
+
+## `kraty.events`: `EventsClient`
+
+```dart
+Future&lt;List&lt;EventListing&gt;&gt; listForPlayer({String? as})
+Future&lt;StartAttemptResponse&gt; start(String eventKey, {Map&lt;String, Object?&gt;? playerContext, String? idempotencyKey, String? as})
+Future&lt;ProgressResponse&gt; progress(String eventKey, String attemptId, ProgressInput input, {String? as})
+```
+
+## `kraty.leaderboards`: `LeaderboardsClient`
+
+The dashboard-configured cross-event boards. Addressed by stable
+game-scoped **key**. Wire endpoints:
+
+- `GET /sdk/v1/leaderboards` (list the game's boards)
+- `GET /sdk/v1/leaderboards/:key`
+- `GET /sdk/v1/leaderboards/:key/standings`
+- `GET /sdk/v1/leaderboards/:key/periods`
+- `POST /sdk/v1/players/:externalId/leaderboards/:key/join`
+- `POST /sdk/v1/players/:externalId/leaderboards/:key/score`
+
+```dart
+Future&lt;List&lt;LeaderboardSummary&gt;&gt; list()
+Future&lt;Leaderboard&gt;            read(String key, {LeaderboardReadOptions? options})
+Future&lt;Leaderboard&gt;            join(String key, {int? limit, String? segment, String? as})
+Future&lt;BoardStandings&gt;         standings(String key, {StandingsReadOptions? options})
+Future&lt;LeaderboardScoreResult&gt; submitScore(String key, num value, {String? segment, String? idempotencyKey, String? as})
+Future&lt;LeaderboardPeriods&gt;     listPeriods(String key, {int? limit})
+```
+
+`LeaderboardReadOptions`:
+- `int? limit`: 1–200, default 50 server-side
+- `String? segment`: bucket value; required only for `context` segmentation. Omit for `progression`-segmented boards (server derives the caller's division); unsegmented boards ignore it
+- `String? period`: `"current"` (default) or an ISO timestamp from `LeaderboardPeriod.periodStartedAt`
+- `bool includeSelf`: when true, response includes `self: { rank, score }` (live periods only)
+- `String? externalId`: required when `includeSelf` is true; lazily resolved otherwise
+
+`join` enrols the active player at score 0 without submitting a score; returns the current standings with `joined: true`. Idempotent (never resets an existing score). Pass `segment` for `context` boards; omit for `progression` boards (server derives the division from the caller's balance).
+
+`standings` is a multi-segment read. Returns one `StandingsSegment` block per segment selected by `scope`. `StandingsReadOptions`:
+- `String? scope`: `'self_segment'`, `'mine'`, `'segment'`, `'all'` (default `'all'`)
+- `String? segment`: required when `scope == 'segment'` on a segmented board
+- `String? period`: `'current'` (default) or an ISO timestamp from `listPeriods`
+- `String? externalId`: auto-resolved for `self_segment` / `mine`
+- `int? limit`: per-segment top-N (1..200, default 50)
+- `int? maxSegments`: cap on returned segment blocks (1..100, default 20)
+
+`BoardStandings`: `key`, `leaderboardId`, `scope`, `resetCadence`, `scoreAggregation`, `period`, `List&lt;StandingsSegment&gt; segments`, `bool segmentsTruncated`.
+`StandingsSegment`: `String? segment`, `bool participated`, `int? selfRank`, `List&lt;LeaderboardEntry&gt; entries`.
+
+`submitScore` submits a score for the active player directly to the board, outside an event attempt. `segment` is required only for `context` segmentation; omit for `progression` boards (server derives the division); unsegmented boards ignore it. Errors: `client_scoring_disabled` (403, board is server-only), `score_not_supported` (400, progression-ranked board), `not_found` (404), `validation_failed` (400). Returns `LeaderboardScoreResult`:
+- `String leaderboardId`
+- `num score`
+- `int? rank`
+
+## `kraty.eventLeaderboards`: `EventLeaderboardsClient`
+
+The auto-generated per-event-window leaderboard. Addressed by the
+**UUID** returned in `events.start(...)`'s `attempt.leaderboardId`.
+Includes Server-Sent Events live streaming. Wire endpoints:
+
+- `GET /sdk/v1/event-leaderboards/:id`
+- `GET /sdk/v1/event-leaderboards/:id/stream`
+- `POST /sdk/v1/players/:externalId/event-leaderboards/:id/join`
+
+```dart
+Future&lt;EventLeaderboard&gt;       read(String leaderboardId, {EventLeaderboardReadOptions? options})
+Future&lt;EventLeaderboard&gt;       join(String leaderboardId, {int? limit, String? as})
+Future&lt;LeaderboardStream&gt;      live(String leaderboardId)
+LiveLeaderboardSubscription   subscribe(String leaderboardId, {Duration pollInterval = const Duration(seconds: 15)})
+```
+
+`join` enrols the active player in the current event window at score 0 without starting a scoring attempt; returns the board with `joined: true`. Idempotent. Throws `KratyApiError` with code `conflict` (409) once the window has finalized.
+
+`EventLeaderboardReadOptions`:
+- `int? limit`
+- `bool includeSelf`
+- `String? externalId`
+
+`EventLeaderboard` read response includes `bool finalized` and, when finalized, `String? finalizedReason` (`session_terminated` \| `window_closed`), which powers the finalization catch-up's session-vs-window distinction.
+
+`LiveLeaderboardSubscription`:
+- `Stream&lt;LeaderboardStreamEvent&gt; events`: broadcast stream, deduped by `(participantId, score)`
+- `Stream&lt;Object&gt; errors`: transport / poll failures (non-fatal)
+- `Future&lt;void&gt; cancel()`: idempotent
+
+Set `pollInterval: Duration.zero` to disable polling (SSE-only).
+
+## `kraty.grants`: `GrantsClient`
+
+```dart
+Future&lt;List&lt;Grant&gt;&gt;      listPending({int? limit, String? as})
+Future&lt;Grant&gt;            claim(String grantId, {String? idempotencyKey, String? as})
+Future&lt;OpenCrateResponse&gt; open(String grantId, {String? idempotencyKey, String? as})
+Future&lt;CollectAllResult&gt; collectAll({String? as})
+```
+
+`CollectAllResult`:
+- `List&lt;Grant&gt; opened`
+- `List&lt;Grant&gt; claimed`
+- `List&lt;CollectAllFailure&gt; failures`
+- `bool get hasFailures`
+
+## `kraty.lobbies`: `LobbiesClient`
+
+```dart
+Future&lt;Lobby&gt; read(String lobbyId)
+```
+
+## `kraty.inventory`: `InventoryClient`
+
+```dart
+Future&lt;List&lt;PlayerItemHolding&gt;&gt; list({String? as})
+Future&lt;ConsumeItemResult&gt;       consume(String itemKey, ConsumeItemInput input, {String? as})
+```
+
+## `kraty.wallet`: `WalletClient`
+
+```dart
+Future&lt;List&lt;PlayerWalletHolding&gt;&gt; list({String? as})
+Future&lt;DebitWalletResult&gt;         debit(String economyKey, DebitWalletInput input, {String? as})
+```
+
+## `kraty.dailyLogin`: `DailyLoginClient`
+
+```dart
+Future&lt;DailyLogin?&gt; read({String? as})
+```
+
+`GET /sdk/v1/players/:p/daily-login`. The game's daily login calendar:
+`days[{ day, entries }]`, `afterLastDay`, `loginStreak`, `currentDay`,
+`paidToday`, `todayGrantId`, `nextDayAt`, `itemKey`. `null` when the game
+has none or it is off for the key's environment. Read-only: the request's
+session is what pays today's reward (a `daily_login` grant).
+
+## `kraty.offers`: `OffersClient`
+
+```dart
+Future&lt;List&lt;Offer&gt;&gt;            list({int? limit, int? level, String? as})
+Future&lt;OfferImpressionResult&gt;  markShown(String instanceId, {String? idempotencyKey, String? as})
+Future&lt;Offer&gt;                  dismiss(String instanceId, {String? idempotencyKey, String? as})
+Future&lt;OfferTriggerResult&gt;     trigger(OfferTriggerInput input, {Map&lt;String, Object?&gt;? playerContext, String? idempotencyKey, String? as})
+Future&lt;OfferClaimResult&gt;       claim(String instanceId, {required int tier, String? idempotencyKey, String? as})
+
+// OfferTriggerInput (sealed)
+const OfferTriggerInput.failEvent(String key, {int? consecutive})
+const OfferTriggerInput.resourceDepleted(String resource, {required int required, required int available, int? secondsToRegen})
+const OfferTriggerInput.levelReached(int level)
+
+String canonicalTransactionId({required String store, String? transactionId, String? orderId, String? purchaseToken})
+```
+
+`GET /sdk/v1/players/:p/offers` (`limit` ≤ 20, default 10; `level` for
+`level_reached` offers), `POST …/offers/:instanceId/impression`, `…/dismiss`
+and `…/offers/triggers` (docs/26). Listing is not an impression: call
+`markShown` when the offer is on screen (it starts a `first_shown` timer).
+The SDK generates `idempotencyKey` when omitted. Sell
+`offer.current.skus[store]` and pass `offer.instanceId` as
+`TrackPurchaseInput.offerInstanceId`; when `result.offer.studioFulfils` is
+true (the offer is set to game delivers; by default Kraty delivers, so do not grant it too) the game delivers `result.offer.contents` itself.
+`trigger` answers the newly armed offers that can be shown now (empty when
+none did). Win-back offers need no call.
+
+Free chain tiers: `OfferTier.type` is `paid` or `free` (`isFree`). A free
+tier has `storeProductKey == ''` (null on the wire, kept non-null so the
+field isn't breaking), empty `skus` and `referencePriceMinor == 0`; never
+send it to a store. `claim` is `POST …/offers/:instanceId/claim` with
+`{idempotencyKey, tier}` (`tier` = the `offer.tier` the player tapped) and
+answers `OfferClaimResult {claim: OfferClaim, offer}`: the chain moves to
+the next tier (its timer starts now) or completes. When
+`claim.studioFulfils` is true (the offer is set to game delivers; by default Kraty delivers, so do not grant it too) the game delivers
+`claim.contents`. A refusal throws `KratyApiError` with `code ==
+'conflict'`, `details['reason']` (`tier_changed`, `tier_not_free`,
+`offer_closed`) and `details['offer']`, the offer now.
+
+Revision 4 (docs/26 § 13): `Offer.variantKey` is the A/B variant this player
+sees (`current`, `next` and `presentation` already reflect it; null for the
+base config); `Offer.linkedEventKey` is the linked event's key (show the sale
+on that event's screen), else null. `OfferClaim.variantKey` and
+`PurchaseOfferResult.variantKey` name the variant claimed or sold.
+`OfferImpressionResult.cappedReason` (`offer_cycle`, `offer_day`,
+`global_session`, `global_day`, `global_gap`) and `retryAt` explain a
+refused impression; respect `capped`. Re-rendering an offer already shown this
+session is never refused by the game-wide caps.
+
+`canonicalTransactionId` returns the id client and server must both report:
+StoreKit 2 `transactionId` on the App Store, the `orderId` (`GPA.…`) on
+Google Play (`GooglePlayPurchaseDetails.billingClientPurchase.orderId`; the
+purchase token only without one), other stores unchanged.
+
+## `kraty.guilds`: `GuildsClient`
+
+```dart
+Future&lt;GuildClientConfig&gt;       config({String? as})
+Future&lt;MyGuild?&gt;                mine({String? as})
+Future&lt;GuildDetail&gt;             get(String guildId, {String? as})
+Future&lt;List&lt;GuildSummary&gt;&gt;      search(String query, {String? country, int? limit, int? offset, String? as})
+Future&lt;GuildSearchPage&gt;         searchPage(String query, {String? country, int? limit, int? offset, String? as}) // guilds + nextOffset
+Future&lt;List&lt;GuildSummary&gt;&gt;      recommended({String? country, int? limit, String? as})
+Future&lt;MyGuild&gt;                 create({required String name, String? description, String? badge, String? country, String? joinType, Map&lt;String, Object?&gt;? metadata, String? as})
+Future&lt;GuildJoinResult&gt;         join(String guildId, {String? message, String? as})
+Future&lt;List&lt;GuildJoinRequest&gt;&gt;  myRequests({String? as})
+Future&lt;void&gt;                    cancelRequest(String requestId, {String? as})
+Future&lt;GuildDetail&gt;             updateProfile({String? name, ..., String? as})
+Future&lt;GuildLeaveResult&gt;        leave({String? as})
+Future&lt;List&lt;GuildJoinRequest&gt;&gt;  requests({String? as})
+Future&lt;GuildDetail&gt;             acceptRequest(String requestId, {String? as})
+Future&lt;void&gt;                    declineRequest(String requestId, {String? as})
+Future&lt;GuildDetail&gt;             kick / promote / demote(String memberExternalId, {String? as})
+Future&lt;GuildDetail&gt;             transferLeadership(String memberExternalId, {String? as})
+Future&lt;GuildHelpOverview&gt;       help({String? as})
+Future&lt;GuildHelpRequest&gt;        requestHelp({required String type, required String resourceKey, required int amount, String? as})
+Future&lt;GuildHelpDonation&gt;       donate(String requestId, {int? amount, String? as})
+Future&lt;GuildHelpRequest&gt;        cancelHelp(String requestId, {String? as})
+```
+
+`/sdk/v1/players/:p/guild*` and `/guilds*` (docs/25). One guild per player,
+50 members max, leader / co-leader / member.
+
+## `kraty.chat`: `ChatClient`
+
+```dart
+Future&lt;ChatClientConfig&gt;      config({String? as})
+Future&lt;ChatPreferences&gt;       preferences({String? as})
+Future&lt;ChatPreferences&gt;       setPreferences({bool? profanityFilter, bool resetProfanityFilter = false, String? allowDirectFrom, String? as})
+Future&lt;ChatConversationPage&gt;  conversations({String? kind, int? limit, int? offset, String? as}) // conversations + nextOffset
+Future&lt;ChatUnread&gt;            unread({String? as})
+Future&lt;ChatConversation&gt;      conversation(String conversationId, {String? as})               // + members (groups)
+Future&lt;ChatConversation&gt;      openDirect({String? externalPlayerId, String? friendCode, String? as}) // exactly one
+Future&lt;ChatConversation&gt;      createGroup({required String title, List&lt;String&gt;? externalPlayerIds, Map&lt;String, Object?&gt;? metadata, String? as})
+Future&lt;ChatConversation&gt;      updateGroup(String conversationId, {String? title, Map&lt;String, Object?&gt;? metadata, String? as})
+Future&lt;ChatConversation&gt;      addMembers(String conversationId, List&lt;String&gt; externalPlayerIds, {String? as})
+Future&lt;void&gt;                  removeMember(String conversationId, String externalPlayerId, {String? as})
+Future&lt;ChatConversation&gt;      setRole(String conversationId, String externalPlayerId, String role, {String? as}) // owner | admin | member
+Future&lt;void&gt;                  leave(String conversationId, {String? as})
+Future&lt;ChatConversation&gt;      guild({String? as})                                              // 409 conflict when guildless
+Future&lt;List&lt;ChatConversation&gt;&gt; channels({String? as})
+Future&lt;ChatConversation&gt;      channel(String key, {String? as})
+Future&lt;ChatMessagePage&gt;       messages(String conversationId, {int? before, int? after, int? limit, String? as}) // oldest -&gt; newest + hasMore
+Future&lt;ChatMessage&gt;           send(String conversationId, String text, {String? replyToId, String? clientMessageId, String? as})
+Future&lt;ChatMessage&gt;           sendCustom(String conversationId, String customType, Object? payload, {String? text, String? replyToId, String? clientMessageId, String? as})
+Future&lt;ChatMessage&gt;           editMessage(String conversationId, String messageId, String text, {String? as}) // own message, within editWindowSeconds
+Future&lt;void&gt;                  deleteMessage(String conversationId, String messageId, {String? as})
+Future&lt;int&gt;                   markRead(String conversationId, int seq, {String? as})          // returns lastReadSeq
+Future&lt;void&gt;                  typing(String conversationId, {String? as})
+Future&lt;ChatConversation&gt;      setConversationSettings(String conversationId, {DateTime? mutedUntil, bool unmute = false, bool? hidden, String? as})
+Future&lt;ChatStream&gt;            live({List&lt;String&gt;? channels, String? as})                       // SSE
+```
+
+`/sdk/v1/players/:p/chat/*` (docs/26). A paid add-on: when it's off every
+call throws `KratyApiError` with `isChatDisabled` (403 `chat_disabled`).
+`send` / `sendCustom` generate a v4 UUID `clientMessageId` when none is
+passed; reuse it to retry a send idempotently. Message `seq` is gapless and
+ascending per conversation: the `before` / `after` cursor.
+`editMessage` (`PATCH .../messages/:messageId` `{ text }`) edits the player's
+own message while `ChatClientConfig.editWindowSeconds` (0 = editing off) has
+not elapsed; the result has `ChatMessage.editedAt` (ISO string, null = never
+edited; `edited` getter) set. Otherwise 403 `chat_edit_not_allowed`
+(`isChatEditNotAllowed`); the filter and `chat_message_rejected` /
+`chat_message_invalid` / 429 behave as on send.
+
+`KratyClientOptions.chatProfanityFilter` (`bool?`, default null): when set,
+every chat call and the stream send `X-Kraty-Chat-Filter: on|off` (the
+stream also `?filter=on|off`). Null = the player's saved preference, then the
+kind's default.
+
+`ChatStream`: `Stream&lt;ChatStreamEvent&gt; events`, `Stream&lt;Object&gt; errors`,
+`Future&lt;void&gt; cancel()`. No auto-reconnect; after reconnecting, catch up with
+`messages(id, after: lastSeq)`. `ChatStreamEvent` is sealed:
+`ChatReadyEvent` (`externalPlayerId`, `conversationIds`, `channels`),
+`ChatMessageEvent` (`message`), `ChatMessageEditedEvent` (`message_edited`:
+`message`, the full updated copy), `ChatMessageDeletedEvent`,
+`ChatTypingEvent`, `ChatReadEvent`, `ChatConversationAddedEvent`
+(`conversationKind`), `ChatConversationUpdatedEvent`,
+`ChatConversationRemovedEvent`, `ChatRestrictionEvent` (`restrictionKind`),
+`ChatRestrictionLiftedEvent`, `ChatCloseEvent` (server draining: reconnect),
+`ChatUnknownEvent`. Each keeps `kind` (the SSE event name) and raw `data`.
+
+## `kraty.moderation`: `ModerationClient`
+
+```dart
+Future&lt;MyReport&gt;         report({required String targetExternalPlayerId, required String category, String? context, String? comment, String? conversationId, List&lt;String&gt;? messageIds, String? guildId, String? as})
+Future&lt;List&lt;MyReport&gt;&gt;   reports({int? limit, String? as})
+Future&lt;ModerationStatus&gt; status({String? as})
+Future&lt;Restriction&gt;      acknowledgeWarning(String restrictionId, {String? as})
+```
+
+`/sdk/v1/players/:p/reports` and `/moderation/*`. Works in every game (no
+add-on). `category` / `context` take the `ReportCategory` / `ReportContext`
+constants. `ModerationStatus.pendingWarnings` lists unacknowledged warnings.
+
+## `kraty.players`: `PlayersClient`
+
+```dart
+Future&lt;PlayerRegistration&gt; register(String externalPlayerId, {bool force = false})
+```
+
+## `kraty.catalog`: `CatalogClient`
+
+```dart
+Future&lt;Catalog&gt; get()
+```
+
+## Polling helpers
+
+```dart
+Stream&lt;List&lt;Grant&gt;&gt; pollPendingGrants(GrantsClient grants, {PollPendingGrantsOptions? options})
+Future&lt;Lobby&gt;       pollLobbyUntilActive(LobbiesClient lobbies, String lobbyId, {PollLobbyOptions? options})
+```
+
+## Secret stores
+
+```dart
+abstract class SecretStore { ... }
+class InMemorySecretStore implements SecretStore        // tests
+class DefaultSecretStore implements SecretStore         // best-effort default
+class SharedPreferencesSecretStore implements SecretStore  // wraps shared_preferences
+```
+
+## DTOs (response shapes)
+
+`Attempt`, `StartAttemptResponse`, `ProgressInput`, `ProgressResponse`,
+`MilestoneFired`, `EventListing`, `EntryCost`, `EntryCostCurrency`,
+`EntryCostItem`, `Leaderboard`, `LeaderboardSummary`, `EventLeaderboard`, `LeaderboardEntry`,
+`LeaderboardSelf`, `LeaderboardPeriod`, `LeaderboardPeriods`, `Grant`,
+`OpenCrateResponse`, `Lobby`, `PlayerItemHolding`, `PlayerWalletHolding`,
+`DailyLogin`, `DailyLoginDay`,
+`GuildClientConfig`, `GuildSummary`, `GuildMember`, `GuildDetail`, `MyGuild`, `GuildJoinRequest`,
+`GuildJoinResult`, `GuildLeaveResult`, `GuildHelpRequest`,
+`GuildHelpOverview`, `GuildHelpDonation`, `GuildPlayerRef`,
+`ChatClientConfig`, `ChatKindSettings`, `ChatCustomType`, `ChatPreferences`,
+`ChatConversation`, `ChatConversationPage`, `ChatPeer`, `ChatPostDenied`,
+`ChatChannel`, `ChatChannelRequirement`, `ChatMember`, `ChatMessage`,
+`ChatMessagePage`, `ChatSender`, `ChatPlayerRef`, `ChatUnread`,
+`MyReport`, `ModerationStatus`, `Restriction`,
+`PlayerRegistration`, `ConsumeItemInput`, `ConsumeItemResult`,
+`DebitWalletInput`, `DebitWalletResult`, `Catalog`, `CatalogItem`,
+`CatalogCurrency`, `RewardBundlePreview`, `RewardEntryPreview`,
+`RewardPolicySummary`, `RewardPolicyTier`,
+`Offer`, `OfferTier`, `OfferPresentation`, `OfferImpressionResult`,
+`OfferTriggerInput` (`OfferFailEventTrigger`, `OfferResourceDepletedTrigger`,
+`OfferLevelReachedTrigger`), `OfferTriggerResult`, `OfferClaim`, `OfferClaimResult`, `PurchaseOfferResult`.
+
+`TrackPurchaseInput.offerInstanceId` (optional);
+`TrackPurchaseResult.offer` (`PurchaseOfferResult?`, null when not attributed).
+
+## Errors
+
+```dart
+class KratyApiError extends Error      // non-2xx: has code, status, message
+class KratyNetworkError extends Error  // transport / parse failure
+```
+
+`KratyApiError` boolean helpers:
+`isLobbyForming`, `isInsufficientEntryCost`, `isPlayerSecretInvalid`,
+`isPlayerAlreadyRegistered`, `isEntryRequirementFailed`,
+`isNoLeaderboard`, `isNoActiveWindow`, `isMaxAttemptsReached`,
+`isAttemptExpired`, `isAttemptCompleted`, `isChatDisabled`, `isChatMuted`,
+`isChatBanned`, `isChatEditNotAllowed`, `isChatRateLimited`
+(`chat_rate_limited` or `chat_slow_mode`; `details['retryAfterSeconds']`).
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

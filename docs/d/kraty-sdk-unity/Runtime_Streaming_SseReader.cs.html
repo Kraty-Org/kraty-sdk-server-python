@@ -1,0 +1,640 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-unity/Runtime/Streaming/SseReader.cs</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-unity/Runtime/Streaming/SseReader.cs</h1><p class=muted>kraty-sdk-unity/Runtime/Streaming/SseReader.cs</p><pre><code class="language-csharp">using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net.Http;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+
+namespace Kraty
+{
+    /// &lt;summary&gt;
+    /// Server-Sent Events plumbing shared by every Kraty stream
+    /// (leaderboards, inventory, chat): opening the long-lived request, mapping a
+    /// non-2xx response onto the SDK's error types, and parsing the
+    /// &lt;c&gt;event:&lt;/c&gt; / &lt;c&gt;data:&lt;/c&gt; line protocol.
+    ///
+    /// &lt;para&gt;
+    /// Each stream keeps its own strongly-typed event class and its own
+    /// handle; only the transport lives here, so adding a stream is a
+    /// factory plus a DTO rather than another copy of the parser.
+    /// &lt;/para&gt;
+    /// &lt;/summary&gt;
+    internal static class SseReader
+    {
+        private static JToken ParseKeepingDates(string raw)
+        {
+            using var reader = new JsonTextReader(new StringReader(raw)) { DateParseHandling = DateParseHandling.None };
+            return JToken.ReadFrom(reader);
+        }
+
+        /// &lt;summary&gt;
+        /// Opens the stream and returns the live response. Throws
+        /// &lt;see cref="KratyNetworkError"/&gt; when the connection fails and
+        /// &lt;see cref="KratyApiError"/&gt; for a non-2xx status (the body is
+        /// drained and parsed first so the caller sees the real error code).
+        /// &lt;paramref name="label"/&gt; only shapes error messages.
+        /// &lt;/summary&gt;
+        public static async Task&lt;HttpResponseMessage&gt; OpenAsync(
+            HttpClient http,
+            string url,
+            string authHeader,
+            string? playerSecret,
+            string label,
+            CancellationToken cancellationToken,
+            IReadOnlyDictionary&lt;string, string&gt;? extraHeaders = null
+        )
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("authorization", authHeader);
+            req.Headers.TryAddWithoutValidation("accept", "text/event-stream");
+            if (!string.IsNullOrEmpty(playerSecret))
+            {
+                req.Headers.TryAddWithoutValidation("x-player-secret", playerSecret);
+            }
+            if (extraHeaders != null)
+            {
+                foreach (var h in extraHeaders) req.Headers.TryAddWithoutValidation(h.Key, h.Value);
+            }
+
+            HttpResponseMessage response;
+            try
+            {
+                response = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                throw new KratyNetworkError($"{label} connect failed: {ex.Message}", ex);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var bodyText = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var retryAfter = KratyClient.ReadRetryAfter(response);
+                response.Dispose();
+                string? code = null;
+                string? message = null;
+                Dictionary&lt;string, object?&gt;? details = null;
+                try
+                {
+                    var root = JToken.Parse(bodyText);
+                    if (root.Type == JTokenType.Object &amp;&amp; root["error"] is JObject err)
+                    {
+                        code = (string?)err["code"];
+                        message = (string?)err["message"];
+                        var d = err["details"];
+                        if (d != null)
+                        {
+                            details = new Dictionary&lt;string, object?&gt; { ["raw"] = d.ToString(Formatting.None) };
+                        }
+                    }
+                }
+                catch { /* not JSON, fall through */ }
+                throw new KratyApiError(
+                    (int)response.StatusCode,
+                    code ?? $"http_{(int)response.StatusCode}",
+                    message ?? bodyText,
+                    details
+                )
+                { RetryAfterHeader = retryAfter };
+            }
+
+            return response;
+        }
+
+        /// &lt;summary&gt;
+        /// Reads the response body until the server closes it or
+        /// &lt;paramref name="cts"/&gt; fires, invoking
+        /// &lt;paramref name="onEvent"/&gt; once per complete SSE event.
+        /// Parse failures and read failures go to &lt;paramref name="onError"/&gt;;
+        /// a cancellation is never reported as an error.
+        /// &lt;paramref name="rawDates"/&gt; keeps ISO timestamps as JSON strings
+        /// (instead of Json.NET's default date tokens) so typed DTOs with
+        /// &lt;c&gt;string&lt;/c&gt; timestamp fields read them back verbatim.
+        /// &lt;/summary&gt;
+        public static async Task PumpAsync(
+            HttpResponseMessage response,
+            CancellationTokenSource cts,
+            Action&lt;string, Dictionary&lt;string, JToken&gt;&gt; onEvent,
+            Action&lt;Exception&gt; onError,
+            bool rawDates = false
+        )
+        {
+            var readErr = await ReadAsync(
+                response,
+                cts.Token,
+                (kind, data) =&gt;
+                {
+                    onEvent(kind, data);
+                    return Task.FromResult(true);
+                },
+                onError,
+                rawDates
+            ).ConfigureAwait(false);
+            if (readErr != null &amp;&amp; !cts.Token.IsCancellationRequested) onError(readErr);
+        }
+
+        /// &lt;summary&gt;
+        /// The parser behind &lt;see cref="PumpAsync"/&gt;. Awaits
+        /// &lt;paramref name="onEvent"/&gt; before reading on (so a handler can do
+        /// async work, e.g. a chat catch-up, while live events wait in the
+        /// socket), and stops when it returns false. &lt;paramref name="onLine"/&gt;
+        /// fires for every line read, comments (&lt;c&gt;: ping&lt;/c&gt;) included: the
+        /// heartbeat watchdog's activity signal. Parse failures go to
+        /// &lt;paramref name="onParseError"/&gt;. Returns the read / loop failure
+        /// that ended the stream, or null on a clean end of stream, a stop,
+        /// or a cancellation.
+        /// &lt;/summary&gt;
+        public static async Task&lt;Exception?&gt; ReadAsync(
+            HttpResponseMessage response,
+            CancellationToken token,
+            Func&lt;string, Dictionary&lt;string, JToken&gt;, Task&lt;bool&gt;&gt; onEvent,
+            Action&lt;Exception&gt; onParseError,
+            bool rawDates = false,
+            Action? onLine = null
+        )
+        {
+            try
+            {
+                using var bodyStream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+                using var reader = new StreamReader(bodyStream, Encoding.UTF8);
+                string currentEvent = "message";
+                var dataBuffer = new StringBuilder();
+
+                // Returns false when the handler asked to stop.
+                async Task&lt;bool&gt; Emit()
+                {
+                    if (dataBuffer.Length == 0)
+                    {
+                        currentEvent = "message";
+                        return true;
+                    }
+                    var raw = dataBuffer.ToString();
+                    var kind = currentEvent;
+                    dataBuffer.Clear();
+                    currentEvent = "message";
+                    Dictionary&lt;string, JToken&gt; dict;
+                    try
+                    {
+                        var root = rawDates ? ParseKeepingDates(raw) : JToken.Parse(raw);
+                        dict = new Dictionary&lt;string, JToken&gt;();
+                        if (root is JObject obj)
+                        {
+                            foreach (var prop in obj.Properties())
+                            {
+                                dict[prop.Name] = prop.Value;
+                            }
+                        }
+                        else
+                        {
+                            dict["value"] = root;
+                        }
+                    }
+                    catch (Exception parseErr)
+                    {
+                        onParseError(parseErr);
+                        return true;
+                    }
+                    return await onEvent(kind, dict).ConfigureAwait(false);
+                }
+
+                // ReadLineAsync doesn't take a CT on netstandard2.1, so
+                // poll the reader and bail when the token fires by
+                // disposing the stream out from under it.
+                using var registration = token.Register(() =&gt;
+                {
+                    try { bodyStream.Dispose(); } catch { /* swallow */ }
+                });
+
+                while (!token.IsCancellationRequested)
+                {
+                    string? line;
+                    try
+                    {
+                        line = await reader.ReadLineAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception readErr)
+                    {
+                        return token.IsCancellationRequested ? null : readErr;
+                    }
+                    onLine?.Invoke();
+                    if (line == null)
+                    {
+                        // Server closed the stream; flush any
+                        // pending event, then exit cleanly.
+                        await Emit().ConfigureAwait(false);
+                        return null;
+                    }
+                    if (line.Length == 0)
+                    {
+                        // Blank line terminates an event.
+                        if (!await Emit().ConfigureAwait(false)) return null;
+                        continue;
+                    }
+                    if (line[0] == ':')
+                    {
+                        // Comment / heartbeat (`: ping`): only activity.
+                        continue;
+                    }
+                    var colonIdx = line.IndexOf(':');
+                    if (colonIdx &lt; 0) continue;
+                    var field = line.Substring(0, colonIdx);
+                    var value = line.Substring(colonIdx + 1);
+                    // Spec: a single leading space in the value is
+                    // optional and should be stripped.
+                    if (value.Length &gt; 0 &amp;&amp; value[0] == ' ') value = value.Substring(1);
+                    switch (field)
+                    {
+                        case "event":
+                            currentEvent = value;
+                            break;
+                        case "data":
+                            if (dataBuffer.Length &gt; 0) dataBuffer.Append('\n');
+                            dataBuffer.Append(value);
+                            break;
+                        // SSE also defines `id` and `retry`, which we
+                        // don't use.
+                        default:
+                            break;
+                    }
+                }
+                return null;
+            }
+            catch (Exception loopErr)
+            {
+                return token.IsCancellationRequested ? null : loopErr;
+            }
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// Options for the live streams (&lt;c&gt;Chat.LiveAsync&lt;/c&gt;,
+    /// &lt;c&gt;EventLeaderboards.LiveAsync&lt;/c&gt; / &lt;c&gt;Subscribe&lt;/c&gt;,
+    /// &lt;c&gt;Inventory.LiveAsync&lt;/c&gt; / &lt;c&gt;WatchAsync&lt;/c&gt;).
+    /// &lt;/summary&gt;
+    public sealed class StreamOptions
+    {
+        /// &lt;summary&gt;
+        /// Reconnect on your behalf (default true). The stream survives server
+        /// restarts, rebalances, a busy server and network drops: it waits
+        /// (the server's &lt;c&gt;retryAfterMs&lt;/c&gt; / &lt;c&gt;Retry-After&lt;/c&gt;, else a
+        /// jittered backoff up to 15 s), reopens and reports the gap through
+        /// &lt;c&gt;OnConnection&lt;/c&gt;; drops and the server's &lt;c&gt;close&lt;/c&gt; never
+        /// reach &lt;c&gt;OnError&lt;/c&gt; / &lt;c&gt;OnClose&lt;/c&gt;. The chat stream also catches
+        /// up on messages missed while away. Only a refusal to reopen (401,
+        /// 403 &lt;c&gt;chat_disabled&lt;/c&gt;, 404, …) stops it, through &lt;c&gt;OnError&lt;/c&gt;.
+        /// False restores the single-connection behaviour: the stream ends on
+        /// the first drop or &lt;c&gt;close&lt;/c&gt;, and reopening is up to you.
+        /// &lt;/summary&gt;
+        public bool AutoReconnect { get; set; } = true;
+
+        /// &lt;summary&gt;
+        /// With &lt;see cref="AutoReconnect"/&gt;: when nothing at all (no event, no
+        /// &lt;c&gt;: ping&lt;/c&gt; comment; the server pings every 15 s) arrives for this
+        /// long, the connection is treated as dead and reopened (reason
+        /// &lt;c&gt;heartbeat_timeout&lt;/c&gt;). Default 40 s; &lt;see cref="TimeSpan.Zero"/&gt;
+        /// turns the watchdog off.
+        /// &lt;/summary&gt;
+        public TimeSpan HeartbeatTimeout { get; set; } = TimeSpan.FromSeconds(40);
+
+        // Reconnect backoff (no server hint): base * 2^(n-1) * [0.5, 1], capped.
+        // Internal so tests can shrink them.
+        internal TimeSpan ReconnectBaseDelay { get; set; } = TimeSpan.FromSeconds(1);
+        internal TimeSpan ReconnectMaxDelay { get; set; } = TimeSpan.FromSeconds(15);
+    }
+
+    /// &lt;summary&gt;State in a &lt;see cref="StreamConnectionEvent"/&gt;.&lt;/summary&gt;
+    public enum StreamConnectionState
+    {
+        /// &lt;summary&gt;Connected and live (after &lt;c&gt;ready&lt;/c&gt; and, for chat, the catch-up).&lt;/summary&gt;
+        Connected,
+        /// &lt;summary&gt;The connection was lost; the SDK is waiting to reopen it.&lt;/summary&gt;
+        Reconnecting,
+    }
+
+    /// &lt;summary&gt;Why a stream is reconnecting (&lt;see cref="StreamConnectionEvent.Reason"/&gt;).&lt;/summary&gt;
+    public static class StreamReconnectReason
+    {
+        /// &lt;summary&gt;The server is shutting down (deploy / scale-in).&lt;/summary&gt;
+        public const string Shutdown = "shutdown";
+        /// &lt;summary&gt;The server moved this stream to another instance.&lt;/summary&gt;
+        public const string Rebalance = "rebalance";
+        /// &lt;summary&gt;The server cut off a client that stopped reading.&lt;/summary&gt;
+        public const string SlowConsumer = "slow_consumer";
+        /// &lt;summary&gt;Nothing arrived for &lt;see cref="StreamOptions.HeartbeatTimeout"/&gt;.&lt;/summary&gt;
+        public const string HeartbeatTimeout = "heartbeat_timeout";
+        /// &lt;summary&gt;A network / read failure, or a retryable error reopening.&lt;/summary&gt;
+        public const string Error = "error";
+        /// &lt;summary&gt;The server answered 503 (busy, scaling up) when reopening.&lt;/summary&gt;
+        public const string Busy = "busy";
+        /// &lt;summary&gt;The connection ended without a reason.&lt;/summary&gt;
+        public const string Ended = "ended";
+    }
+
+    /// &lt;summary&gt;
+    /// Connection status of an auto-reconnecting stream: not an error, just
+    /// what to show (e.g. a "reconnecting…" badge). Fires
+    /// &lt;see cref="StreamConnectionState.Connected"/&gt; after every successful
+    /// connect (the first one included) and
+    /// &lt;see cref="StreamConnectionState.Reconnecting"/&gt; each time the SDK
+    /// schedules a reopen.
+    /// &lt;/summary&gt;
+    public sealed class StreamConnectionEvent
+    {
+        public StreamConnectionState State { get; }
+        /// &lt;summary&gt;Why it's reconnecting (&lt;see cref="StreamReconnectReason"/&gt;); null on &lt;c&gt;Connected&lt;/c&gt;.&lt;/summary&gt;
+        public string? Reason { get; }
+        /// &lt;summary&gt;How long until the next attempt; null on &lt;c&gt;Connected&lt;/c&gt;.&lt;/summary&gt;
+        public TimeSpan? RetryIn { get; }
+        /// &lt;summary&gt;The reconnect attempt (1, 2, …; resets once connected); null on &lt;c&gt;Connected&lt;/c&gt;.&lt;/summary&gt;
+        public int? Attempt { get; }
+
+        public StreamConnectionEvent(StreamConnectionState state, string? reason = null, TimeSpan? retryIn = null, int? attempt = null)
+        {
+            State = state;
+            Reason = reason;
+            RetryIn = retryIn;
+            Attempt = attempt;
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// The reconnect loop shared by every auto-reconnecting stream. Each
+    /// stream plugs in how to open, how to deliver an event, and (chat) what
+    /// to do once a reopened connection is &lt;c&gt;ready&lt;/c&gt;.
+    /// &lt;/summary&gt;
+    internal sealed class SseReconnectLoop
+    {
+        public Func&lt;CancellationToken, Task&lt;HttpResponseMessage&gt;&gt; Open { get; set; } = _ =&gt; throw new InvalidOperationException();
+        /// &lt;summary&gt;Hands a live event to the game (never sees &lt;c&gt;close&lt;/c&gt;).&lt;/summary&gt;
+        public Action&lt;string, Dictionary&lt;string, JToken&gt;&gt; Deliver { get; set; } = (_, __) =&gt; { };
+        /// &lt;summary&gt;After &lt;c&gt;ready&lt;/c&gt; is delivered: (isReconnect, ct). Throwing counts as a drop.&lt;/summary&gt;
+        public Func&lt;bool, CancellationToken, Task&gt;? AfterReady { get; set; }
+        /// &lt;summary&gt;An event after which the stream ends for good (delivered first).&lt;/summary&gt;
+        public Func&lt;string, bool&gt;? IsFinal { get; set; }
+        public Action&lt;StreamConnectionEvent&gt; Status { get; set; } = _ =&gt; { };
+        /// &lt;summary&gt;Parse errors, and the error that stopped the loop (a refused reopen).&lt;/summary&gt;
+        public Action&lt;Exception&gt; Error { get; set; } = _ =&gt; { };
+        public bool RawDates { get; set; }
+        public StreamOptions Options { get; set; } = new();
+
+        private static readonly System.Diagnostics.Stopwatch Clock = System.Diagnostics.Stopwatch.StartNew();
+        private static readonly Random Rng = new();
+
+        /// &lt;summary&gt;Network, 5xx (incl. 503 busy), 408 and 429 are worth another try; other 4xx are final.&lt;/summary&gt;
+        internal static bool IsRetryable(Exception e) =&gt;
+            e is KratyNetworkError
+            || (e is KratyApiError a &amp;&amp; (a.Status &gt;= 500 || a.Status == 408 || a.Status == 429));
+
+        /// &lt;summary&gt;
+        /// The first connect of an auto-reconnecting stream: a refusal throws
+        /// (as the single-connection API does); a retryable failure comes back
+        /// as the error to start the loop with, so the stream begins in
+        /// &lt;c&gt;Reconnecting&lt;/c&gt; instead of failing.
+        /// &lt;/summary&gt;
+        internal static async Task&lt;(HttpResponseMessage? Response, Exception? Error)&gt; OpenFirstAsync(
+            Func&lt;CancellationToken, Task&lt;HttpResponseMessage&gt;&gt; open, CancellationToken ct)
+        {
+            try
+            {
+                return (await open(ct).ConfigureAwait(false), null);
+            }
+            catch (Exception err) when (IsRetryable(err) &amp;&amp; !ct.IsCancellationRequested)
+            {
+                return (null, err);
+            }
+        }
+
+        /// &lt;summary&gt;&lt;paramref name="baseDelay"/&gt; * 2^(attempt-1), capped at &lt;paramref name="max"/&gt;, times a random factor in [0.5, 1].&lt;/summary&gt;
+        internal static TimeSpan Backoff(int attempt, TimeSpan baseDelay, TimeSpan max)
+        {
+            var ms = baseDelay.TotalMilliseconds * Math.Pow(2, Math.Max(0, attempt - 1));
+            if (ms &gt; max.TotalMilliseconds) ms = max.TotalMilliseconds;
+            double factor;
+            lock (Rng) factor = 0.5 + Rng.NextDouble() * 0.5;
+            return TimeSpan.FromMilliseconds(ms * factor);
+        }
+
+        private TimeSpan Backoff(int attempt) =&gt; Backoff(attempt, Options.ReconnectBaseDelay, Options.ReconnectMaxDelay);
+
+        private sealed class Outcome
+        {
+            public bool Stop;
+            public string Reason = StreamReconnectReason.Ended;
+            public TimeSpan? Delay;
+        }
+
+        private sealed class Connection
+        {
+            public long LastActivityMs;
+            public int Busy;
+            public bool TimedOut;
+            public Outcome? Outcome;
+        }
+
+        /// &lt;summary&gt;
+        /// Runs until &lt;paramref name="stop"/&gt; fires, a final event arrives, or a
+        /// reopen is refused. &lt;paramref name="first"/&gt; is the already-open first
+        /// connection, or null when the first attempt failed with the
+        /// retryable &lt;paramref name="firstError"/&gt;.
+        /// &lt;/summary&gt;
+        public async Task RunAsync(HttpResponseMessage? first, Exception? firstError, CancellationToken stop)
+        {
+            var attempt = 0;
+            var opened = 0;
+            var response = first;
+            var pending = firstError;
+            while (!stop.IsCancellationRequested)
+            {
+                Outcome outcome;
+                if (response == null)
+                {
+                    if (pending == null)
+                    {
+                        try
+                        {
+                            response = await Open(stop).ConfigureAwait(false);
+                        }
+                        catch (Exception e)
+                        {
+                            if (stop.IsCancellationRequested) return;
+                            pending = e;
+                        }
+                    }
+                    if (pending != null)
+                    {
+                        if (!IsRetryable(pending))
+                        {
+                            Error(pending);
+                            return;
+                        }
+                        outcome = FromFailure(pending);
+                        pending = null;
+                        if (!await ScheduleAsync(outcome, ++attempt, stop).ConfigureAwait(false)) return;
+                        continue;
+                    }
+                }
+
+                try
+                {
+                    outcome = await RunConnectionAsync(response!, opened++ &gt; 0, () =&gt; attempt = 0, stop).ConfigureAwait(false);
+                }
+                finally
+                {
+                    try { response!.Dispose(); } catch { /* swallow */ }
+                    response = null;
+                }
+                if (outcome.Stop || stop.IsCancellationRequested) return;
+                if (!await ScheduleAsync(outcome, ++attempt, stop).ConfigureAwait(false)) return;
+            }
+        }
+
+        // Reports `reconnecting` and waits. False when stopped meanwhile.
+        private async Task&lt;bool&gt; ScheduleAsync(Outcome outcome, int attempt, CancellationToken stop)
+        {
+            var delay = outcome.Delay ?? Backoff(attempt);
+            try { Status(new StreamConnectionEvent(StreamConnectionState.Reconnecting, outcome.Reason, delay, attempt)); }
+            catch (Exception cbErr) { Error(cbErr); }
+            try
+            {
+                await Task.Delay(delay, stop).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            return !stop.IsCancellationRequested;
+        }
+
+        private static Outcome FromFailure(Exception e) =&gt; new Outcome
+        {
+            Reason = e is KratyApiError a &amp;&amp; a.Status == 503 ? StreamReconnectReason.Busy : StreamReconnectReason.Error,
+            Delay = (e as KratyApiError)?.ServerRetryAfter,
+        };
+
+        private static Outcome FromClose(Dictionary&lt;string, JToken&gt; data)
+        {
+            var reason = data.TryGetValue("reason", out var r) &amp;&amp; r.Type == JTokenType.String ? (string?)r : null;
+            TimeSpan? delay = null;
+            if (data.TryGetValue("retryAfterMs", out var ms) &amp;&amp; (ms.Type == JTokenType.Integer || ms.Type == JTokenType.Float))
+            {
+                delay = TimeSpan.FromMilliseconds(Math.Max(0, (double)ms));
+            }
+            return new Outcome
+            {
+                Reason = string.IsNullOrEmpty(reason) ? StreamReconnectReason.Shutdown : reason!,
+                Delay = delay,
+            };
+        }
+
+        private async Task&lt;Outcome&gt; RunConnectionAsync(
+            HttpResponseMessage response, bool isReconnect, Action onConnected, CancellationToken stop)
+        {
+            using var conn = CancellationTokenSource.CreateLinkedTokenSource(stop);
+            var state = new Connection { LastActivityMs = Clock.ElapsedMilliseconds };
+            var heartbeat = Options.HeartbeatTimeout;
+            var watchdog = heartbeat &gt; TimeSpan.Zero ? WatchAsync(state, heartbeat, conn) : Task.CompletedTask;
+
+            async Task&lt;bool&gt; OnEvent(string kind, Dictionary&lt;string, JToken&gt; data)
+            {
+                if (kind == "close")
+                {
+                    state.Outcome = FromClose(data);
+                    return false;
+                }
+                Volatile.Write(ref state.Busy, 1);
+                try
+                {
+                    Deliver(kind, data);
+                    if (IsFinal != null &amp;&amp; IsFinal(kind))
+                    {
+                        state.Outcome = new Outcome { Stop = true };
+                        return false;
+                    }
+                    if (kind == "ready")
+                    {
+                        if (AfterReady != null)
+                        {
+                            try
+                            {
+                                await AfterReady(isReconnect, conn.Token).ConfigureAwait(false);
+                            }
+                            catch (Exception e)
+                            {
+                                if (conn.IsCancellationRequested) return false;
+                                if (!IsRetryable(e)) Error(e);
+                                state.Outcome = FromFailure(e);
+                                return false;
+                            }
+                        }
+                        onConnected();
+                        try { Status(new StreamConnectionEvent(StreamConnectionState.Connected)); }
+                        catch (Exception cbErr) { Error(cbErr); }
+                    }
+                    return true;
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref state.LastActivityMs, Clock.ElapsedMilliseconds);
+                    Volatile.Write(ref state.Busy, 0);
+                }
+            }
+
+            var readErr = await SseReader.ReadAsync(
+                response,
+                conn.Token,
+                OnEvent,
+                Error,
+                RawDates,
+                () =&gt; Interlocked.Exchange(ref state.LastActivityMs, Clock.ElapsedMilliseconds)
+            ).ConfigureAwait(false);
+
+            try { conn.Cancel(); } catch { /* swallow */ }
+            try { await watchdog.ConfigureAwait(false); } catch { /* swallow */ }
+
+            if (stop.IsCancellationRequested) return new Outcome { Stop = true };
+            if (state.Outcome != null) return state.Outcome;
+            if (state.TimedOut) return new Outcome { Reason = StreamReconnectReason.HeartbeatTimeout };
+            return new Outcome { Reason = readErr != null ? StreamReconnectReason.Error : StreamReconnectReason.Ended };
+        }
+
+        // Closes the connection when nothing arrived for `timeout` (time spent
+        // inside an event handler, e.g. the chat catch-up, doesn't count).
+        private static async Task WatchAsync(Connection state, TimeSpan timeout, CancellationTokenSource conn)
+        {
+            var limit = (long)timeout.TotalMilliseconds;
+            while (!conn.IsCancellationRequested)
+            {
+                long wait;
+                if (Volatile.Read(ref state.Busy) == 1)
+                {
+                    wait = limit;
+                }
+                else
+                {
+                    var idle = Clock.ElapsedMilliseconds - Interlocked.Read(ref state.LastActivityMs);
+                    if (idle &gt;= limit)
+                    {
+                        state.TimedOut = true;
+                        try { conn.Cancel(); } catch { /* swallow */ }
+                        return;
+                    }
+                    wait = limit - idle;
+                }
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(1, wait)), conn.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+            }
+        }
+    }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

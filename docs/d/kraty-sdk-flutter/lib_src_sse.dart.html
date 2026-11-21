@@ -1,0 +1,184 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-flutter/lib/src/sse.dart</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-flutter/lib/src/sse.dart</h1><p class=muted>kraty-sdk-flutter/lib/src/sse.dart</p><pre><code class="language-dart">import 'dart:async';
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+
+import 'errors.dart';
+
+/// Minimal Server-Sent Events reader shared by every Kraty stream
+/// (leaderboards, inventory, chat). Parses the `event:` / `data:` line protocol
+/// off a long-lived HTTP response and surfaces one [SseEvent] per event.
+///
+/// This reader holds ONE connection and never reconnects: transport
+/// failures land on [SseStream.errors]. The `live()` helpers (chat,
+/// leaderboard, inventory) wrap it in a self-healing loop by default
+/// (`reconnecting_sse.dart`).
+
+/// One parsed SSE event: the `event:` name plus the decoded `data:` JSON.
+class SseEvent {
+  final String kind;
+  final Map&lt;String, Object?&gt; data;
+  const SseEvent({required this.kind, required this.data});
+}
+
+/// Handle to an open SSE subscription.
+class SseStream {
+  /// Server-pushed events. Single-subscriber.
+  final Stream&lt;SseEvent&gt; events;
+
+  /// Transport failures (network drop, server crash mid-stream) and
+  /// malformed payloads. Broadcast, so several listeners can watch it.
+  final Stream&lt;Object&gt; errors;
+
+  final Future&lt;void&gt; Function() _cancel;
+
+  const SseStream(this.events, this.errors, this._cancel);
+
+  /// Cancels the subscription + closes the HTTP socket. Idempotent, so
+  /// it's safe to call after the server closes the stream itself.
+  Future&lt;void&gt; cancel() =&gt; _cancel();
+}
+
+/// Opens an SSE subscription against `baseUrl + path`.
+///
+/// Implementation note: this uses a long-lived `http.Request` (NOT
+/// `http.Client.get`, which buffers the whole body) and parses the framing
+/// line by line. A blank line terminates an event; `event:` / `data:` are
+/// the fields we read; `:`-prefixed comment lines are heartbeats and are
+/// ignored. [label] only shapes error messages. [headers] are added to
+/// the request (e.g. the chat stream's `X-Kraty-Chat-Filter`).
+/// [onActivity] fires for every line received, `: ping` comments
+/// included (the reconnecting helpers' heartbeat watchdog uses it).
+Future&lt;SseStream&gt; openSseStream({
+  required String baseUrl,
+  required String path,
+  required String authHeader,
+  required http.Client httpClient,
+  required String sdkUserAgent,
+  required String label,
+  String? playerSecret,
+  Map&lt;String, String&gt;? headers,
+  void Function()? onActivity,
+}) async {
+  final req = http.Request('GET', Uri.parse('$baseUrl$path'));
+  req.headers['authorization'] = authHeader;
+  req.headers['accept'] = 'text/event-stream';
+  req.headers['x-kraty-sdk'] = sdkUserAgent;
+  if (playerSecret != null &amp;&amp; playerSecret.isNotEmpty) {
+    req.headers['x-player-secret'] = playerSecret;
+  }
+  if (headers != null) req.headers.addAll(headers);
+
+  late http.StreamedResponse response;
+  try {
+    response = await httpClient.send(req);
+  } catch (err) {
+    throw KratyNetworkError('$label connect failed: $err', err);
+  }
+  if (response.statusCode &lt; 200 || response.statusCode &gt;= 300) {
+    // Drain the body so the connection doesn't dangle, then surface the
+    // error in the same shape the rest of the SDK uses.
+    final bodyText = await response.stream.transform(utf8.decoder).join();
+    Map&lt;String, Object?&gt; errBody = const &lt;String, Object?&gt;{};
+    try {
+      final decoded = jsonDecode(bodyText);
+      if (decoded is Map) {
+        final inner = decoded['error'];
+        if (inner is Map) {
+          errBody = inner.cast&lt;String, Object?&gt;();
+        }
+      }
+    } catch (_) {
+      // Body wasn't JSON, so fall back to the status code as message.
+    }
+    throw KratyApiError(
+      status: response.statusCode,
+      code: (errBody['code'] as String?) ?? 'http_${response.statusCode}',
+      message: (errBody['message'] as String?) ?? bodyText,
+      details: errBody['details'],
+      retryAfterHeaderSeconds: parseRetryAfterHeader(response.headers['retry-after']),
+    );
+  }
+
+  final eventsCtrl = StreamController&lt;SseEvent&gt;();
+  final errorsCtrl = StreamController&lt;Object&gt;.broadcast();
+  StreamSubscription&lt;String&gt;? lineSub;
+  String currentEvent = 'message';
+  final dataBuffer = StringBuffer();
+
+  void emit() {
+    if (dataBuffer.isEmpty) {
+      currentEvent = 'message';
+      return;
+    }
+    try {
+      final parsed = jsonDecode(dataBuffer.toString());
+      final asMap = parsed is Map
+          ? parsed.cast&lt;String, Object?&gt;()
+          : &lt;String, Object?&gt;{'value': parsed};
+      eventsCtrl.add(SseEvent(kind: currentEvent, data: asMap));
+    } catch (err) {
+      errorsCtrl.add(err);
+    }
+    dataBuffer.clear();
+    currentEvent = 'message';
+  }
+
+  lineSub = response.stream
+      .transform(utf8.decoder)
+      .transform(const LineSplitter())
+      .listen(
+    (line) {
+      onActivity?.call();
+      if (line.isEmpty) {
+        // Blank line terminates an event.
+        emit();
+        return;
+      }
+      if (line.startsWith(':')) {
+        // Comment / heartbeat: ignore.
+        return;
+      }
+      final colonIdx = line.indexOf(':');
+      if (colonIdx &lt; 0) return;
+      final field = line.substring(0, colonIdx);
+      // Spec: a single leading space in the value is optional and
+      // should be stripped.
+      var value = line.substring(colonIdx + 1);
+      if (value.startsWith(' ')) value = value.substring(1);
+      switch (field) {
+        case 'event':
+          currentEvent = value;
+          break;
+        case 'data':
+          if (dataBuffer.isNotEmpty) dataBuffer.write('\n');
+          dataBuffer.write(value);
+          break;
+        // SSE also defines `id` and `retry`, which we don't use.
+        default:
+          break;
+      }
+    },
+    onError: (Object err) {
+      errorsCtrl.add(err);
+    },
+    onDone: () {
+      // Surface anything still buffered as a final event, then close.
+      emit();
+      if (!eventsCtrl.isClosed) eventsCtrl.close();
+      if (!errorsCtrl.isClosed) errorsCtrl.close();
+    },
+    cancelOnError: false,
+  );
+
+  Future&lt;void&gt; cancel() async {
+    await lineSub?.cancel();
+    if (!eventsCtrl.isClosed) await eventsCtrl.close();
+    if (!errorsCtrl.isClosed) await errorsCtrl.close();
+  }
+
+  return SseStream(eventsCtrl.stream, errorsCtrl.stream, cancel);
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

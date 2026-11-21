@@ -1,0 +1,235 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-server-typescript/src/offers.test.ts</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-server-typescript/src/offers.test.ts</h1><p class=muted>kraty-sdk-server-typescript/src/offers.test.ts</p><pre><code class="language-typescript">import { describe, expect, it, vi } from 'vitest';
+import { KratyServer, type Offer } from './index.js';
+
+/**
+ * `kraty.offers` (docs/26): the server list, the authoritative trigger
+ * report, and `offerInstanceId` on purchase tracking.
+ */
+
+interface FakeCall {
+  url: string;
+  method: string;
+  body: unknown;
+}
+
+function makeFetch(bodies: Array&lt;{ status: number; body: unknown }&gt;) {
+  const calls: FakeCall[] = [];
+  let i = 0;
+  const fn = vi.fn(async (url: string | URL, init?: RequestInit) =&gt; {
+    calls.push({
+      url: String(url),
+      method: (init?.method ?? 'GET').toUpperCase(),
+      body: init?.body ? JSON.parse(init.body as string) : undefined,
+    });
+    const next = bodies[i++];
+    if (!next) throw new Error(`fake fetch exhausted; got call ${i}`);
+    return new Response(JSON.stringify(next.body), {
+      status: next.status,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as unknown as typeof fetch;
+  return { fetch: fn, calls };
+}
+
+const make = (fetchImpl: typeof fetch) =&gt;
+  new KratyServer({
+    apiKey: 'sUUVdrM8.djr4-0Iv9h1JvVNSMZNDmSsSN7lSVq2F9dG6DG4A5uQ',
+    baseUrl: 'https://api.test.kraty.io',
+    fetch: fetchImpl,
+    generateIdempotencyKey: () =&gt; 'idem-1',
+    retry: { attempts: 1, initialDelayMs: 1, maxDelayMs: 5, jitter: 0 },
+  });
+
+const INSTANCE = '5b0c1f3e-7d4a-4f8e-9c2b-1a6d3e8f0b47';
+const offer: Offer = {
+  instanceId: INSTANCE,
+  offerKey: 'starter',
+  kind: 'starter_pack',
+  name: { en: 'Starter' },
+  description: null,
+  state: 'available',
+  tier: 0,
+  tierCount: 1,
+  current: {
+    index: 0,
+    type: 'paid',
+    storeProductKey: 'starter_499',
+    skus: { google_play: 'com.game.starter' },
+    referencePriceMinor: 499,
+    contents: [{ type: 'currency', currencyKey: 'gems', amount: 500 }],
+    label: null,
+    valueLabel: null,
+  },
+  next: null,
+  expiresAt: null,
+  tierExpiresAt: null,
+  endsWithSession: false,
+  purchasesRemaining: 1,
+  presentation: {},
+  variantKey: null,
+  linkedEventKey: null,
+};
+
+describe('offers', () =&gt; {
+  it('list carries variantKey and linkedEventKey (Revision 4)', async () =&gt; {
+    const linked = { ...offer, variantKey: 'b', linkedEventKey: 'lava_quest' };
+    const { fetch } = makeFetch([{ status: 200, body: { data: [linked] } }]);
+    const out = await make(fetch).offers.list('p1');
+    expect(out[0]?.variantKey).toBe('b');
+    expect(out[0]?.linkedEventKey).toBe('lava_quest');
+  });
+
+  it('list GETs the player offers with limit and level', async () =&gt; {
+    const { fetch, calls } = makeFetch([{ status: 200, body: { data: [offer] } }]);
+    const kraty = make(fetch);
+    const out = await kraty.offers.list('player 42', { limit: 5, level: 12 });
+    expect(out[0]?.instanceId).toBe(INSTANCE);
+    expect(calls[0]?.method).toBe('GET');
+    expect(calls[0]?.url).toBe(
+      'https://api.test.kraty.io/server/v1/players/player%2042/offers?limit=5&amp;level=12',
+    );
+  });
+
+  it('list without options sends no query', async () =&gt; {
+    const { fetch, calls } = makeFetch([{ status: 200, body: { data: [] } }]);
+    expect(await make(fetch).offers.list('p1')).toEqual([]);
+    expect(calls[0]?.url).toBe('https://api.test.kraty.io/server/v1/players/p1/offers');
+  });
+
+  it('trigger POSTs the union, player context and a stamped idempotency key', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      { status: 200, body: { data: { offers: [offer] } } },
+      { status: 200, body: { data: { offers: [] } } },
+    ]);
+    const kraty = make(fetch);
+    const armed = await kraty.offers.trigger(
+      'p1',
+      { type: 'fail_event', key: 'level_failed', consecutive: 2 },
+      { playerContext: { level: 7 } },
+    );
+    expect(armed.offers).toHaveLength(1);
+    expect(calls[0]?.url).toBe('https://api.test.kraty.io/server/v1/players/p1/offers/triggers');
+    expect(calls[0]?.body).toEqual({
+      trigger: { type: 'fail_event', key: 'level_failed', consecutive: 2 },
+      playerContext: { level: 7 },
+      idempotencyKey: 'idem-1',
+    });
+
+    const none = await kraty.offers.trigger(
+      'p1',
+      { type: 'resource_depleted', resource: 'lives', required: 1, available: 0 },
+      { idempotencyKey: 'mine' },
+    );
+    expect(none.offers).toEqual([]);
+    expect(calls[1]?.body).toEqual({
+      trigger: { type: 'resource_depleted', resource: 'lives', required: 1, available: 0 },
+      idempotencyKey: 'mine',
+    });
+  });
+
+  it('purchases.track passes offerInstanceId and returns the attribution', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      {
+        status: 201,
+        body: {
+          data: {
+            purchaseId: 'p1',
+            deduplicated: false,
+            offer: {
+              offerId: 'o1',
+              offerKey: 'starter',
+              instanceId: INSTANCE,
+              tier: 0,
+              method: 'explicit',
+              status: 'granted',
+              state: 'completed',
+              granted: true,
+              pendingVerification: false,
+              studioFulfils: false,
+              contents: [{ type: 'currency', currencyKey: 'gems', amount: 500 }],
+              validationStatus: 'verified',
+              variantKey: 'b',
+            },
+          },
+        },
+      },
+    ]);
+    const result = await make(fetch).purchases.track('p1', {
+      transactionId: 'GPA.1',
+      store: 'google_play',
+      productId: 'com.game.starter',
+      amountMinor: 499,
+      currency: 'USD',
+      validationStatus: 'verified',
+      offerInstanceId: INSTANCE,
+    });
+    expect((calls[0]?.body as Record&lt;string, unknown&gt;)['offerInstanceId']).toBe(INSTANCE);
+    expect(result.offer?.granted).toBe(true);
+    expect(result.offer?.method).toBe('explicit');
+    // Revision 4: the A/B arm whose config was sold.
+    expect(result.offer?.variantKey).toBe('b');
+  });
+
+  it('claim POSTs the tapped free tier with a stamped idempotency key', async () =&gt; {
+    const chain: Offer = {
+      ...offer,
+      kind: 'chain',
+      tier: 1,
+      tierCount: 3,
+      current: { ...offer.current, index: 1, type: 'free', storeProductKey: null, skus: {}, referencePriceMinor: 0 },
+      purchasesRemaining: null,
+    };
+    const claim = {
+      claimId: 'c-1',
+      offerId: 'o-1',
+      offerKey: 'endless',
+      instanceId: INSTANCE,
+      tier: 1,
+      contents: chain.current.contents,
+      granted: false,
+      grantId: null,
+      studioFulfils: true,
+      claimedAt: '2026-10-15T12:00:00.000Z',
+      variantKey: null,
+    };
+    const { fetch, calls } = makeFetch([
+      { status: 200, body: { data: { claim, offer: { ...chain, tier: 2 } } } },
+      { status: 200, body: { data: { claim, offer: chain } } },
+    ]);
+    const kraty = make(fetch);
+    const out = await kraty.offers.claim('player 42', INSTANCE, { tier: 1 });
+    expect(out.claim.studioFulfils).toBe(true);
+    expect(out.offer.tier).toBe(2);
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.url).toBe(
+      `https://api.test.kraty.io/server/v1/players/player%2042/offers/${INSTANCE}/claim`,
+    );
+    expect(calls[0]?.body).toEqual({ tier: 1, idempotencyKey: 'idem-1' });
+
+    await kraty.offers.claim('p1', INSTANCE, { tier: 0, idempotencyKey: 'mine' });
+    expect(calls[1]?.body).toEqual({ tier: 0, idempotencyKey: 'mine' });
+  });
+
+  it('a refused claim surfaces the conflict reason and the current offer', async () =&gt; {
+    const { fetch } = makeFetch([
+      {
+        status: 409,
+        body: {
+          error: {
+            code: 'conflict',
+            message: 'the current tier is not free',
+            details: { reason: 'tier_not_free', offer },
+          },
+        },
+      },
+    ]);
+    await expect(make(fetch).offers.claim('p1', INSTANCE, { tier: 0 })).rejects.toMatchObject({
+      status: 409,
+      code: 'conflict',
+      details: { reason: 'tier_not_free', offer: { instanceId: INSTANCE } },
+    });
+  });
+});
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

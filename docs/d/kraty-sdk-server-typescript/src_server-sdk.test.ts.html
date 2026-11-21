@@ -1,0 +1,623 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-server-typescript/src/server-sdk.test.ts</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-server-typescript/src/server-sdk.test.ts</h1><p class=muted>kraty-sdk-server-typescript/src/server-sdk.test.ts</p><pre><code class="language-typescript">import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  KratyNetworkError,
+  KratyServer,
+  KratyServerClient,
+  KratyServerError,
+} from './index.js';
+
+/**
+ * Tests for the Node server SDK. Mirrors the test surface of the
+ * client SDK but targets the `/server/v1` shape: idempotent mints
+ * (grants / credit / item-grant), revoke / debit, lobby push, and
+ * the player snapshot read.
+ */
+
+interface FakeCall {
+  url: string;
+  method: string;
+  headers: Record&lt;string, string&gt;;
+  body: unknown;
+}
+
+function makeFetch(responses: Array&lt;() =&gt; Response | Promise&lt;Response&gt;&gt;) {
+  const calls: FakeCall[] = [];
+  let i = 0;
+  const fn = vi.fn(async (url: string | URL, init?: RequestInit) =&gt; {
+    calls.push({
+      url: String(url),
+      method: (init?.method ?? 'GET').toUpperCase(),
+      headers: Object.fromEntries(
+        Object.entries((init?.headers ?? {}) as Record&lt;string, string&gt;),
+      ),
+      body: init?.body ? JSON.parse(init.body as string) : undefined,
+    });
+    const factory = responses[i++];
+    if (!factory) throw new Error(`fake fetch exhausted; got call ${i}`);
+    return await factory();
+  }) as unknown as typeof fetch;
+  return { fetch: fn, calls };
+}
+
+function jsonRes(status: number, body: unknown, headers: Record&lt;string, string&gt; = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json', ...headers },
+  });
+}
+
+let keyCounter = 0;
+const deterministicKey = (): string =&gt; `idem-${++keyCounter}`;
+
+beforeEach(() =&gt; { keyCounter = 0; });
+afterEach(() =&gt; { vi.restoreAllMocks(); });
+
+const baseOpts = (fetchImpl: typeof fetch) =&gt; ({
+  apiKey: 'sUUVdrM8.djr4-0Iv9h1JvVNSMZNDmSsSN7lSVq2F9dG6DG4A5uQ',
+  baseUrl: 'https://api.test.kraty.io',
+  fetch: fetchImpl,
+  generateIdempotencyKey: deterministicKey,
+  retry: { attempts: 3, initialDelayMs: 1, maxDelayMs: 5, jitter: 0 },
+  timeoutMs: 1_000,
+});
+
+describe('KratyServerClient: request layer', () =&gt; {
+  it('sends Authorization: Bearer &lt;key&gt;', async () =&gt; {
+    const { fetch, calls } = makeFetch([() =&gt; jsonRes(200, { ok: true })]);
+    const c = new KratyServerClient(baseOpts(fetch));
+    await c.request&lt;{ ok: boolean }&gt;('GET', '/server/v1/ping');
+    expect(calls[0]?.headers['authorization']).toBe(
+      'Bearer sUUVdrM8.djr4-0Iv9h1JvVNSMZNDmSsSN7lSVq2F9dG6DG4A5uQ',
+    );
+  });
+
+  it('throws KratyServerError on non-2xx with envelope', async () =&gt; {
+    const { fetch } = makeFetch([
+      () =&gt; jsonRes(404, { error: { code: 'not_found', message: 'no player' } }),
+    ]);
+    const c = new KratyServerClient(baseOpts(fetch));
+    try {
+      await c.request('GET', '/server/v1/players/missing');
+      expect.fail('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(KratyServerError);
+      const apiErr = err as KratyServerError;
+      expect(apiErr.status).toBe(404);
+      expect(apiErr.code).toBe('not_found');
+      expect(apiErr.isNotFound).toBe(true);
+    }
+  });
+
+  it('preserves the same idempotencyKey across retries', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; new Response('', { status: 503 }),
+      () =&gt; new Response('', { status: 503 }),
+      () =&gt; jsonRes(201, { data: {} }),
+    ]);
+    const c = new KratyServerClient(baseOpts(fetch));
+    await c.request('POST', '/server/v1/foo', { x: 1 });
+    expect(calls.length).toBe(3);
+    expect(calls.every((c) =&gt; (c.body as { idempotencyKey: string }).idempotencyKey === 'idem-1')).toBe(true);
+    expect(keyCounter).toBe(1);
+  });
+
+  it('preserves a caller-supplied idempotencyKey (the IAP receipt)', async () =&gt; {
+    const { fetch, calls } = makeFetch([() =&gt; jsonRes(201, { data: {} })]);
+    const c = new KratyServerClient(baseOpts(fetch));
+    await c.request('POST', '/server/v1/foo', { idempotencyKey: 'apple_receipt_abc', x: 1 });
+    expect((calls[0]?.body as { idempotencyKey: string }).idempotencyKey).toBe('apple_receipt_abc');
+    expect(keyCounter).toBe(0);
+  });
+
+  it('wraps fetch crash as KratyNetworkError after retries are exhausted', async () =&gt; {
+    const fetchImpl = vi.fn(async () =&gt; { throw new Error('ECONNRESET'); }) as unknown as typeof fetch;
+    const c = new KratyServerClient({
+      ...baseOpts(fetchImpl),
+      retry: { attempts: 2, initialDelayMs: 1, maxDelayMs: 2, jitter: 0 },
+    });
+    await expect(c.request('POST', '/server/v1/foo', { x: 1 })).rejects.toBeInstanceOf(KratyNetworkError);
+  });
+});
+
+describe('KratyServer: GrantsClient', () =&gt; {
+  it('grants.create posts to the right URL and returns the grant', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(201, { data: { id: 'g1', kind: 'reward', contents: {}, sourceKind: 'api', sourceRefId: 'rcpt', parentGrantId: null, status: 'pending', rolledAt: null, claimedAt: null, expiresAt: null, createdAt: '2026-01-01' } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const g = await k.grants.create('player_42', {
+      idempotencyKey: 'apple_receipt_abc',
+      entries: [{ type: 'currency', currencyKey: 'gold', amount: 500 }],
+      sourceRefId: 'rcpt',
+    });
+    expect(g.id).toBe('g1');
+    expect(calls[0]?.url).toContain('/server/v1/players/player_42/grants');
+    expect(calls[0]?.body).toMatchObject({
+      idempotencyKey: 'apple_receipt_abc',
+      entries: [{ type: 'currency', currencyKey: 'gold', amount: 500 }],
+      sourceRefId: 'rcpt',
+    });
+  });
+
+  it('grants.create surfaces idempotency_conflict as a typed error', async () =&gt; {
+    const { fetch } = makeFetch([
+      () =&gt; jsonRes(409, { error: { code: 'idempotency_conflict', message: 'same key, different body' } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    try {
+      await k.grants.create('player_42', {
+        idempotencyKey: 'rcpt',
+        entries: [{ type: 'currency', currencyKey: 'gold', amount: 100 }],
+      });
+      expect.fail('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(KratyServerError);
+      expect((err as KratyServerError).isIdempotencyConflict).toBe(true);
+    }
+  });
+
+  it('grants.ack posts to the right URL', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { id: 'g1', kind: 'reward', contents: {}, sourceKind: 'api', sourceRefId: null, parentGrantId: null, status: 'claimed', rolledAt: null, claimedAt: '2026-01-01T00:00:00Z', expiresAt: null, createdAt: '2026-01-01' } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const g = await k.grants.ack('player_42', 'g1');
+    expect(g.status).toBe('claimed');
+    expect(calls[0]?.url).toContain('/server/v1/players/player_42/grants/g1/ack');
+  });
+});
+
+describe('KratyServer: InventoryClient', () =&gt; {
+  it('inventory.grant POSTs to /inventory/:itemKey/grant', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { itemKey: 'starter_chest', quantity: 1, applied: true } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const res = await k.inventory.grant('player_42', 'starter_chest', {
+      quantity: 1,
+      reason: 'iap',
+      idempotencyKey: 'rcpt',
+    });
+    expect(res.applied).toBe(true);
+    expect(res.quantity).toBe(1);
+    expect(calls[0]?.url).toContain('/server/v1/players/player_42/inventory/starter_chest/grant');
+    expect(calls[0]?.body).toMatchObject({ quantity: 1, reason: 'iap', idempotencyKey: 'rcpt' });
+  });
+
+  it('inventory.revoke POSTs to /inventory/:itemKey/revoke', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { itemKey: 'starter_chest', quantity: 0, applied: true } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    await k.inventory.revoke('player_42', 'starter_chest', { quantity: 1, reason: 'chargeback' });
+    expect(calls[0]?.url).toContain('/inventory/starter_chest/revoke');
+    // Auto-stamps idempotency key when caller doesn't supply one.
+    expect((calls[0]?.body as { idempotencyKey: string }).idempotencyKey).toBe('idem-1');
+  });
+});
+
+describe('KratyServer: WalletClient', () =&gt; {
+  it('wallet.credit posts amount + key to /credit', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { economyKey: 'gold', balance: 600, applied: true } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const res = await k.wallet.credit('player_42', 'gold', {
+      amount: 500,
+      reason: 'iap',
+      idempotencyKey: 'rcpt_xyz',
+    });
+    expect(res.balance).toBe(600);
+    expect(calls[0]?.url).toContain('/server/v1/players/player_42/wallet/gold/credit');
+    expect(calls[0]?.body).toMatchObject({ amount: 500, reason: 'iap', idempotencyKey: 'rcpt_xyz' });
+  });
+
+  it('wallet.debit posts amount + key to /debit', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { economyKey: 'gold', balance: 400, applied: true } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    await k.wallet.debit('player_42', 'gold', { amount: 100, reason: 'refund' });
+    expect(calls[0]?.url).toContain('/wallet/gold/debit');
+  });
+});
+
+describe('KratyServer: LobbiesClient', () =&gt; {
+  it('push creates a lobby with the supplied roster + idempotency key', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(201, { data: { id: 'lob1', eventId: 'e1', eventWindowId: 'w1', leaderboardId: 'lb1', mode: 'lobby_matched', status: 'active', capacity: 4, fillBy: null, participantCount: 2, botSlots: 0, startedAt: null, endsAt: null } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const lobby = await k.lobbies.push('game_1', 'quick_brawl', {
+      key: 'matchmaker_lobby_123',
+      externalPlayerIds: ['alice', 'bob'],
+      capacity: 4,
+    });
+    expect(lobby.id).toBe('lob1');
+    expect(calls[0]?.url).toContain('/server/v1/games/game_1/events/quick_brawl/lobbies');
+    expect(calls[0]?.body).toMatchObject({
+      key: 'matchmaker_lobby_123',
+      externalPlayerIds: ['alice', 'bob'],
+      capacity: 4,
+    });
+  });
+
+  it('read GETs from /games/:gameId/lobbies/:lobbyId', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { id: 'lob1', eventId: 'e1', eventWindowId: 'w1', leaderboardId: 'lb1', mode: 'lobby_matched', status: 'active', capacity: 4, fillBy: null, participantCount: 2, botSlots: 0, startedAt: null, endsAt: null } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    await k.lobbies.read('game_1', 'lob1');
+    expect(calls[0]?.url).toContain('/server/v1/games/game_1/lobbies/lob1');
+    expect(calls[0]?.method).toBe('GET');
+  });
+});
+
+describe('KratyServer: PlayersClient', () =&gt; {
+  it('get returns the unified snapshot', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, {
+        data: {
+          player: { id: 'p1', externalPlayerId: 'alice', studioId: 's1', gameId: 'g1', createdAt: '2026-01-01', updatedAt: '2026-01-01' },
+          inventory: [{ itemKey: 'potion', quantity: 3, metadata: {}, createdAt: '2026-01-01', updatedAt: '2026-01-01' }],
+          wallet: [{ economyKey: 'gold', balance: 100, metadata: {}, createdAt: '2026-01-01', updatedAt: '2026-01-01' }],
+          recentGrants: [],
+        },
+      }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const snap = await k.players.get('alice');
+    expect(snap.player.externalPlayerId).toBe('alice');
+    expect(snap.inventory).toHaveLength(1);
+    expect(snap.wallet[0]?.balance).toBe(100);
+    expect(calls[0]?.url).toContain('/server/v1/players/alice');
+  });
+});
+
+describe('KratyServer: PlayersClient GDPR', () =&gt; {
+  it('delete POSTs to /players/:id/delete with reason and returns the outcome', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, {
+        data: {
+          playerId: 'p1',
+          externalPlayerId: 'alice',
+          anonymizedExternalId: '__deleted_abc-123__',
+          deletedAt: '2026-06-11T10:00:00.000Z',
+          attemptsAnonymized: 12,
+          lobbiesAnonymized: 3,
+          leaderboardsScrubbed: 4,
+          status: 'erased',
+        },
+      }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const out = await k.players.delete('alice', { reason: 'gdpr_erasure' });
+    expect(out.status).toBe('erased');
+    expect(out.anonymizedExternalId).toMatch(/^__deleted_/);
+    expect(calls[0]?.url).toContain('/server/v1/players/alice/delete');
+    expect((calls[0]?.body as { reason: string }).reason).toBe('gdpr_erasure');
+  });
+
+  it('delete for a never-existed player returns no_op_never_existed', async () =&gt; {
+    const { fetch } = makeFetch([
+      () =&gt; jsonRes(200, {
+        data: {
+          playerId: null,
+          externalPlayerId: 'ghost',
+          anonymizedExternalId: null,
+          deletedAt: '2026-06-11T10:00:00.000Z',
+          attemptsAnonymized: 0,
+          lobbiesAnonymized: 0,
+          leaderboardsScrubbed: 0,
+          status: 'no_op_never_existed',
+        },
+      }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const out = await k.players.delete('ghost');
+    expect(out.status).toBe('no_op_never_existed');
+    expect(out.playerId).toBeNull();
+  });
+
+  it('export GETs /players/:id/export and returns the bundle', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, {
+        data: {
+          schemaVersion: 1,
+          exportedAt: '2026-06-11T10:00:00.000Z',
+          player: {
+            id: 'p1',
+            externalPlayerId: 'alice',
+            studioId: 's1',
+            gameId: 'g1',
+            firstSeenAt: '2026-01-01T00:00:00.000Z',
+            lastSeenAt: '2026-06-10T12:00:00.000Z',
+            lastContextSnapshot: { country: 'PT' },
+            registeredAt: '2026-01-01T00:00:00.000Z',
+            secretRotatedAt: null,
+            deletedAt: null,
+          },
+          attempts: [{ id: 'att1', status: 'completed' }],
+          grants: [],
+          inventory: [{ itemKey: 'potion', quantity: 3 }],
+          wallet: [{ economyKey: 'gold', balance: 500 }],
+          lobbies: [],
+        },
+      }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const exp = await k.players.export('alice');
+    expect(exp.schemaVersion).toBe(1);
+    expect(exp.player.externalPlayerId).toBe('alice');
+    expect(exp.attempts).toHaveLength(1);
+    expect(calls[0]?.method).toBe('GET');
+    expect(calls[0]?.url).toContain('/server/v1/players/alice/export');
+  });
+
+  it('export surfaces 404 as a typed not-found error', async () =&gt; {
+    const { fetch } = makeFetch([
+      () =&gt; jsonRes(404, { error: { code: 'not_found', message: "Player 'ghost' not found" } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    let caught: unknown = null;
+    try {
+      await k.players.export('ghost');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(KratyServerError);
+    expect((caught as KratyServerError).isNotFound).toBe(true);
+  });
+});
+
+describe('KratyServer: PlayersClient friends (read-only)', () =&gt; {
+  it('friends GETs /players/:id/friends and unwraps data.friends', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, {
+        data: {
+          friends: [
+            {
+              externalPlayerId: 'bob',
+              displayIdentity: { name: 'Bob', avatar: null, country: 'PT' },
+              friendsSince: '2026-01-01T00:00:00.000Z',
+              online: true,
+              lastActiveAt: '2026-06-10T12:00:00.000Z',
+              status: 'in_match',
+            },
+          ],
+        },
+      }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const friends = await k.players.friends('alice');
+    expect(friends).toHaveLength(1);
+    expect(friends[0]?.externalPlayerId).toBe('bob');
+    expect(friends[0]?.online).toBe(true);
+    expect(friends[0]?.displayIdentity?.name).toBe('Bob');
+    expect(calls[0]?.method).toBe('GET');
+    expect(calls[0]?.url).toContain('/server/v1/players/alice/friends');
+  });
+
+  it('friendRequests GETs /friends/requests and returns incoming + outgoing', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, {
+        data: {
+          incoming: [
+            {
+              requestId: 'r1',
+              direction: 'incoming',
+              player: { externalPlayerId: 'carol', displayIdentity: { name: 'Carol' } },
+              createdAt: '2026-06-01T00:00:00.000Z',
+            },
+          ],
+          outgoing: [],
+        },
+      }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const reqs = await k.players.friendRequests('alice');
+    expect(reqs.incoming).toHaveLength(1);
+    expect(reqs.incoming[0]?.direction).toBe('incoming');
+    expect(reqs.outgoing).toHaveLength(0);
+    expect(calls[0]?.method).toBe('GET');
+    expect(calls[0]?.url).toContain('/server/v1/players/alice/friends/requests');
+  });
+
+  it('blocks GETs /players/:id/blocks and unwraps data.blocked', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, {
+        data: {
+          blocked: [
+            {
+              externalPlayerId: 'mallory',
+              displayIdentity: null,
+              blockedAt: '2026-05-01T00:00:00.000Z',
+            },
+          ],
+        },
+      }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const blocked = await k.players.blocks('alice');
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.externalPlayerId).toBe('mallory');
+    expect(blocked[0]?.displayIdentity).toBeNull();
+    expect(calls[0]?.url).toContain('/server/v1/players/alice/blocks');
+  });
+
+  it('friends surfaces 404 as a typed not-found error', async () =&gt; {
+    const { fetch } = makeFetch([
+      () =&gt; jsonRes(404, { error: { code: 'not_found', message: "Player 'ghost' not found" } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    let caught: unknown = null;
+    try {
+      await k.players.friends('ghost');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(KratyServerError);
+    expect((caught as KratyServerError).isNotFound).toBe(true);
+  });
+});
+
+describe('KratyServer: MigrateClient', () =&gt; {
+  it('migrate.players POSTs to /migrate/players with the rows envelope', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { applied: 2, skipped: 0, failed: 0, failures: [] } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const rows = [
+      { externalPlayerId: 'p_1', idempotencyKey: 'p_1' },
+      { externalPlayerId: 'p_2', idempotencyKey: 'p_2', contextSnapshot: { country: 'PT' } },
+    ];
+    const out = await k.migrate.players(rows);
+    expect(out.applied).toBe(2);
+    expect(calls[0]?.url).toContain('/server/v1/migrate/players');
+    expect((calls[0]?.body as { rows: unknown }).rows).toEqual(rows);
+  });
+
+  it('migrate.wallet POSTs to /migrate/wallet', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { applied: 1, skipped: 0, failed: 0, failures: [] } }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const out = await k.migrate.wallet([
+      { externalPlayerId: 'p_1', economyKey: 'gold', amount: 500, idempotencyKey: 'p_1:gold' },
+    ]);
+    expect(out.applied).toBe(1);
+    expect(calls[0]?.url).toContain('/server/v1/migrate/wallet');
+  });
+
+  it('migrate.inventory surfaces per-row failures', async () =&gt; {
+    const { fetch } = makeFetch([
+      () =&gt; jsonRes(200, {
+        data: {
+          applied: 1,
+          skipped: 0,
+          failed: 1,
+          failures: [
+            { rowIndex: 1, externalPlayerId: 'p_2', error: { code: 'unknown_item', message: 'item not found' } },
+          ],
+        },
+      }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const out = await k.migrate.inventory([
+      { externalPlayerId: 'p_1', itemKey: 'potion', quantity: 3, idempotencyKey: 'p_1:potion' },
+      { externalPlayerId: 'p_2', itemKey: 'gone', quantity: 1, idempotencyKey: 'p_2:gone' },
+    ]);
+    expect(out.failed).toBe(1);
+    expect(out.failures[0]?.error.code).toBe('unknown_item');
+  });
+});
+
+describe('KratyServer: HealthClient', () =&gt; {
+  it('ping returns ok + api key info', async () =&gt; {
+    const { fetch } = makeFetch([
+      () =&gt; jsonRes(200, {
+        ok: true,
+        apiKey: { id: 'k1', prefix: 'sUUVdrM8', permissionSet: 'server_integration', environment: 'live', studioId: 's1', gameId: 'g1' },
+      }),
+    ]);
+    const k = new KratyServer(baseOpts(fetch));
+    const p = await k.health.ping();
+    expect(p.ok).toBe(true);
+    expect(p.apiKey.permissionSet).toBe('server_integration');
+  });
+});
+
+describe('KratyServer: GuildsClient', () =&gt; {
+  const G = '0b8a6c56-49bd-4d5a-9d38-1f2b6a5f9b3e';
+
+  it('reads: list (query string), get, forPlayer, leaderboard', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { guilds: [], total: 0 } }),
+      () =&gt; jsonRes(200, { data: { guildId: G } }),
+      () =&gt; jsonRes(200, { data: { guild: null, role: null, history: [] } }),
+    ]);
+    const kraty = new KratyServer(baseOpts(fetch));
+    await kraty.guilds.list({ q: 'owls', player: 'p 1', includeDisbanded: true, limit: 10 });
+    await kraty.guilds.get(G);
+    await expect(kraty.guilds.forPlayer('p 1')).resolves.toMatchObject({ guild: null });
+    expect(calls.map((c) =&gt; `${c.method} ${c.url}`)).toEqual([
+      'GET https://api.test.kraty.io/server/v1/guilds?q=owls&amp;player=p+1&amp;includeDisbanded=true&amp;limit=10',
+      `GET https://api.test.kraty.io/server/v1/guilds/${G}`,
+      'GET https://api.test.kraty.io/server/v1/players/p%201/guild',
+    ]);
+  });
+
+  it('moderation: update, removeMember, setLeader, disband', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { guildId: G } }),
+      () =&gt; jsonRes(200, { data: { disbanded: false, guild: { guildId: G } } }),
+      () =&gt; jsonRes(200, { data: { guildId: G } }),
+      () =&gt; jsonRes(200, { data: { guildId: G } }),
+    ]);
+    const kraty = new KratyServer(baseOpts(fetch));
+    await kraty.guilds.update(G, { name: 'Clean Name' });
+    await kraty.guilds.removeMember(G, 'p 2');
+    await kraty.guilds.setLeader(G, 'p3');
+    await kraty.guilds.disband(G);
+    expect(calls[0]).toMatchObject({ method: 'PATCH', body: { name: 'Clean Name' } });
+    expect(calls[1]!.url).toBe(`https://api.test.kraty.io/server/v1/guilds/${G}/members/p%202/remove`);
+    expect(calls[2]).toMatchObject({ method: 'POST', body: { externalPlayerId: 'p3' } });
+    expect(calls[3]!.url).toBe(`https://api.test.kraty.io/server/v1/guilds/${G}/disband`);
+  });
+});
+
+describe('KratyServer: ChatClient + ModerationClient', () =&gt; {
+  const C = '0b8a6c56-49bd-4d5a-9d38-1f2b6a5f9b3e';
+
+  it('chat: conversationsFor, messages, post, announce, deleteMessage', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { conversations: [], nextOffset: null } }),
+      () =&gt; jsonRes(200, { data: { messages: [], hasMore: false } }),
+      () =&gt; jsonRes(201, { data: { messageId: 'm1', senderKind: 'server' } }),
+      () =&gt; jsonRes(201, { data: { messageId: 'm2', senderKind: 'server' } }),
+      () =&gt; jsonRes(200, { data: { messageId: 'm1', deleted: true } }),
+    ]);
+    const kraty = new KratyServer(baseOpts(fetch));
+    await kraty.chat.conversationsFor('p 1', { kind: 'direct' });
+    await kraty.chat.messages(C, { after: 10, limit: 5 });
+    await kraty.chat.post(C, { text: 'from support' });
+    await expect(kraty.chat.announce('news', { text: 'Maintenance at 5pm' })).resolves.toMatchObject({ senderKind: 'server' });
+    await kraty.chat.deleteMessage('m1');
+    expect(calls.map((c) =&gt; `${c.method} ${c.url}`)).toEqual([
+      'GET https://api.test.kraty.io/server/v1/players/p%201/chat/conversations?kind=direct',
+      `GET https://api.test.kraty.io/server/v1/chat/conversations/${C}/messages?after=10&amp;limit=5`,
+      `POST https://api.test.kraty.io/server/v1/chat/conversations/${C}/messages`,
+      'POST https://api.test.kraty.io/server/v1/chat/channels/news/messages',
+      'DELETE https://api.test.kraty.io/server/v1/chat/messages/m1',
+    ]);
+  });
+
+  it('moderation: reports, playerCase, resolve, restrictions, restrict, lift', async () =&gt; {
+    const { fetch, calls } = makeFetch([
+      () =&gt; jsonRes(200, { data: { reports: [{ reportId: 'r1' }] } }),
+      () =&gt; jsonRes(200, { data: { openReports: 1, reports: [] } }),
+      () =&gt; jsonRes(200, { data: { decision: 'mute', reportsClosed: 1 } }),
+      () =&gt; jsonRes(200, { data: { restrictions: [] } }),
+      () =&gt; jsonRes(201, { data: { restrictionId: 'x1', kind: 'chat_mute' } }),
+      () =&gt; jsonRes(200, { data: { restrictionId: 'x1', active: false } }),
+    ]);
+    const kraty = new KratyServer(baseOpts(fetch));
+    await expect(kraty.moderation.reports({ status: 'open' })).resolves.toHaveLength(1);
+    await kraty.moderation.playerCase('p1');
+    await kraty.moderation.resolve('p1', { decision: 'mute', durationHours: 24 });
+    await kraty.moderation.restrictions('p1');
+    await kraty.moderation.restrict('p1', { kind: 'chat_mute', durationHours: 1 });
+    await kraty.moderation.lift('x1');
+    expect(calls.map((c) =&gt; `${c.method} ${c.url}`)).toEqual([
+      'GET https://api.test.kraty.io/server/v1/moderation/reports?status=open',
+      'GET https://api.test.kraty.io/server/v1/players/p1/moderation',
+      'POST https://api.test.kraty.io/server/v1/players/p1/moderation/resolve',
+      'GET https://api.test.kraty.io/server/v1/players/p1/restrictions',
+      'POST https://api.test.kraty.io/server/v1/players/p1/restrictions',
+      'POST https://api.test.kraty.io/server/v1/restrictions/x1/lift',
+    ]);
+  });
+});
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

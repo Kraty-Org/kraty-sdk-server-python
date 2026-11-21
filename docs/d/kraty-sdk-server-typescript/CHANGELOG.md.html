@@ -1,0 +1,429 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-server-typescript/CHANGELOG.md</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-server-typescript/CHANGELOG.md</h1><p class=muted>kraty-sdk-server-typescript/CHANGELOG.md</p><pre><code class="language-markdown"># Changelog
+
+## Unreleased
+
+### Features
+
+* **offers:** `kraty.offers` (`OffersClient`): `list(externalPlayerId, { limit?, level? })` and `trigger(externalPlayerId, input, { playerContext?, idempotencyKey? })` for real-money offers (docs/26), with the `Offer`, `OfferTier`, `OfferState`, `OfferTriggerInput` and `OfferTriggerResult` types. `purchases.track` takes `offerInstanceId` (the verified door for an offer purchase) and its result carries `offer` (`PurchaseOfferResult`).
+* **offers:** free chain tiers. `offers.claim(externalPlayerId, instanceId, { tier, idempotencyKey? })` claims the current free step of a chain offer for server-driven storefronts (`OfferClaimResult { claim, offer }`; a refusal is a `conflict` error with `details.reason` `tier_changed` / `tier_not_free` / `offer_closed`). `OfferTier` gains `type: 'paid' | 'free'` and `storeProductKey` is now `string | null` (null on a free tier, `skus: {}`, `referencePriceMinor: 0`). New types `OfferTierType`, `OfferClaim`, `OfferClaimResult`, `OfferClaimRefusalReason`.
+* **offers:** Revision 4 (additive). `Offer` gains `variantKey` (the A/B variant the player sees, already applied to `current`, `next` and `presentation`) and `linkedEventKey` (the linked event's key, or null); `OfferClaim.variantKey` and `PurchaseOfferResult.variantKey` name the variant that was claimed or sold. `offers.list` already applies the game-wide offer caps (at most the game's "listed at once", highest priority first). Always present, null when unused.
+* **offers:** delivery default, no API change. New offers default to Kraty delivering their contents (`delivery.grantContents: true`): Kraty grants them (`offer.granted`, `grant.created`; `offer.pendingVerification` until your server reports the purchase verified, test players on test keys at once) and `offer.studioFulfils` is false, so the game must not grant them too. Deliver `offer.contents` / `claim.contents` yourself only when `studioFulfils` is true (offers switched to "Game delivers"). Existing offers keep their setting.
+* **events:** new server-side gate reasons, no API change. Events and offers can gate on in-game currency the player spent (`currency_spent_at_least`) and on days since install (`days_since_install_at_least`); a refused `start` carries `unlock_condition_failed` / `entry_requirement_failed` as before, with a message like `spent 12,500 / 1,000,000 diamonds` or `installed 12 / 100 days ago`. The rules are evaluated by Kraty only; nothing to send from the client.
+
+## [0.19.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.18.3...sdk-server-typescript-v0.19.0) (2026-10-25)
+
+
+### Features
+
+* **offers:** monetization offers next to events ([edf6743](https://github.com/Kraty-Org/Kraty/commit/edf67439317ae0435bd38adc7015450558b3be0d))
+* **offers:** monetization offers next to events ([f6206e6](https://github.com/Kraty-Org/Kraty/commit/f6206e6e31fcd973b93f3ee591175d9e8c3b1e16))
+
+## [0.18.3](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.18.2...sdk-server-typescript-v0.18.3) (2026-10-16)
+
+
+### Documentation
+
+* **sdks:** bump install snippets — clients v0.29.1, server-ts v0.18.2, server-py v0.17.2 ([#89](https://github.com/Kraty-Org/Kraty/issues/89)) ([3942f3b](https://github.com/Kraty-Org/Kraty/commit/3942f3b0618fd1fd12c5c9bb5d1508f77f136365))
+
+## [0.18.2](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.18.1...sdk-server-typescript-v0.18.2) (2026-09-14)
+
+
+### Documentation
+
+* **sdks:** bump install snippets — clients v0.29.0, server-ts v0.18.1, server-py v0.17.1 ([#77](https://github.com/Kraty-Org/Kraty/issues/77)) ([a6a4ff1](https://github.com/Kraty-Org/Kraty/commit/a6a4ff118d6b37afe55e07fb0811c03ad4e5b7ab))
+
+## [0.18.1](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.18.0...sdk-server-typescript-v0.18.1) (2026-08-27)
+
+
+### Documentation
+
+* **sdks:** bump install snippets — clients v0.28.0, server-ts v0.18.0, server-py v0.17.0 ([#69](https://github.com/Kraty-Org/Kraty/issues/69)) ([8974116](https://github.com/Kraty-Org/Kraty/commit/8974116334ff7c2c303bf1e0ddbe16f214fece60))
+
+## [0.18.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.17.0...sdk-server-typescript-v0.18.0) (2026-08-26)
+
+
+### Features
+
+* **commerce:** debug players excluded from revenue; live FX refresh ([#68](https://github.com/Kraty-Org/Kraty/issues/68)) ([e1b0933](https://github.com/Kraty-Org/Kraty/commit/e1b0933e4f65d6dd17d2429534eb6012ba15a37e))
+* **commerce:** real-money purchases, spend aggregates, spend-based gating ([57d5b96](https://github.com/Kraty-Org/Kraty/commit/57d5b96110df08c9e24ad16706981eb5058867de))
+* **commerce:** real-money purchases, spend aggregates, spend-based gating ([1c9ccac](https://github.com/Kraty-Org/Kraty/commit/1c9ccac5b17c25e72f284fc88c2b906af47409e4))
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **friends:** player social graph — friend codes, requests, presence, blocking ([4430123](https://github.com/Kraty-Org/Kraty/commit/4430123e34264b40910f538f32d431453d15a042))
+* **friends:** social graph + matchmade-session score fix + Sessions tab ([f347a22](https://github.com/Kraty-Org/Kraty/commit/f347a220ec65fd38b5db7eed2b7dfb324405479d))
+* **players:** per-player synthetic-identity override (server SDK + admin + portal + docs) ([906fd8c](https://github.com/Kraty-Org/Kraty/commit/906fd8c74cab043b5c5fcca5150dbf594a341e79))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+* **social:** friend gifting — send items and currencies to friends ([83962f9](https://github.com/Kraty-Org/Kraty/commit/83962f9988f6b932a89e9f975f9464302632177a))
+* **social:** friend gifting — send items and currencies to friends ([341ec76](https://github.com/Kraty-Org/Kraty/commit/341ec76009435a516bc71e359e4bc9bd826f9a55))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+* **leaderboards:** merge server-derived country on direct-score paths ([72ff4a7](https://github.com/Kraty-Org/Kraty/commit/72ff4a75428f4f9ac952ccfc65b7649d75d3193f))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+* **sdks:** bump install snippets — clients v0.24.0, server-ts v0.14.0 ([c9e9d83](https://github.com/Kraty-Org/Kraty/commit/c9e9d83c402d8af1d285093d5faec415cdf4e500))
+* **sdks:** bump install snippets — clients v0.25.0, server-ts v0.15.0, server-py v0.14.0 ([5c114d8](https://github.com/Kraty-Org/Kraty/commit/5c114d83e2c611ba6267cbb00bce5435decdc0cd))
+* **sdks:** bump install snippets — clients v0.26.0, server-ts v0.16.0, server-py v0.15.0 ([e1581ce](https://github.com/Kraty-Org/Kraty/commit/e1581ceee55c65a4ee07cfa81587c221bcd1060d))
+* **sdks:** bump install snippets — clients v0.27.0, server-ts v0.17.0, server-py v0.16.0 ([88b32d8](https://github.com/Kraty-Org/Kraty/commit/88b32d802616f4302f9d16d010e7fbfdfcc8acda))
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs for the v0.13.0 / v0.9.0 release ([79ee827](https://github.com/Kraty-Org/Kraty/commit/79ee8271b43a8b5d299bcb94aa91ccea21459820))
+* **sdks:** bump install snippets + READMEs for the v0.14.0 / v0.10.0 release ([87797b6](https://github.com/Kraty-Org/Kraty/commit/87797b602f0bbbdca10f8ca6d34b4309d51be06b))
+* **sdks:** bump install snippets + READMEs for v0.15.0 / v0.11.0 release ([53ca1be](https://github.com/Kraty-Org/Kraty/commit/53ca1beae10f1fcab38c2c3c94c6b75aaad0757a))
+* **sdks:** bump install snippets + READMEs for v0.16.0 / v0.12.0 release ([9bcb424](https://github.com/Kraty-Org/Kraty/commit/9bcb42492e71114205f58d9a193e6d17554abde7))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+
+## [0.17.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.16.0...sdk-server-typescript-v0.17.0) (2026-08-25)
+
+
+### Features
+
+* **commerce:** real-money purchases, spend aggregates, spend-based gating ([57d5b96](https://github.com/Kraty-Org/Kraty/commit/57d5b96110df08c9e24ad16706981eb5058867de))
+* **commerce:** real-money purchases, spend aggregates, spend-based gating ([1c9ccac](https://github.com/Kraty-Org/Kraty/commit/1c9ccac5b17c25e72f284fc88c2b906af47409e4))
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **friends:** player social graph — friend codes, requests, presence, blocking ([4430123](https://github.com/Kraty-Org/Kraty/commit/4430123e34264b40910f538f32d431453d15a042))
+* **friends:** social graph + matchmade-session score fix + Sessions tab ([f347a22](https://github.com/Kraty-Org/Kraty/commit/f347a220ec65fd38b5db7eed2b7dfb324405479d))
+* **players:** per-player synthetic-identity override (server SDK + admin + portal + docs) ([906fd8c](https://github.com/Kraty-Org/Kraty/commit/906fd8c74cab043b5c5fcca5150dbf594a341e79))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+* **social:** friend gifting — send items and currencies to friends ([83962f9](https://github.com/Kraty-Org/Kraty/commit/83962f9988f6b932a89e9f975f9464302632177a))
+* **social:** friend gifting — send items and currencies to friends ([341ec76](https://github.com/Kraty-Org/Kraty/commit/341ec76009435a516bc71e359e4bc9bd826f9a55))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+* **leaderboards:** merge server-derived country on direct-score paths ([72ff4a7](https://github.com/Kraty-Org/Kraty/commit/72ff4a75428f4f9ac952ccfc65b7649d75d3193f))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+* **sdks:** bump install snippets — clients v0.24.0, server-ts v0.14.0 ([c9e9d83](https://github.com/Kraty-Org/Kraty/commit/c9e9d83c402d8af1d285093d5faec415cdf4e500))
+* **sdks:** bump install snippets — clients v0.25.0, server-ts v0.15.0, server-py v0.14.0 ([5c114d8](https://github.com/Kraty-Org/Kraty/commit/5c114d83e2c611ba6267cbb00bce5435decdc0cd))
+* **sdks:** bump install snippets — clients v0.26.0, server-ts v0.16.0, server-py v0.15.0 ([e1581ce](https://github.com/Kraty-Org/Kraty/commit/e1581ceee55c65a4ee07cfa81587c221bcd1060d))
+* **sdks:** bump install snippets — clients v0.27.0, server-ts v0.17.0, server-py v0.16.0 ([88b32d8](https://github.com/Kraty-Org/Kraty/commit/88b32d802616f4302f9d16d010e7fbfdfcc8acda))
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs for the v0.13.0 / v0.9.0 release ([79ee827](https://github.com/Kraty-Org/Kraty/commit/79ee8271b43a8b5d299bcb94aa91ccea21459820))
+* **sdks:** bump install snippets + READMEs for the v0.14.0 / v0.10.0 release ([87797b6](https://github.com/Kraty-Org/Kraty/commit/87797b602f0bbbdca10f8ca6d34b4309d51be06b))
+* **sdks:** bump install snippets + READMEs for v0.15.0 / v0.11.0 release ([53ca1be](https://github.com/Kraty-Org/Kraty/commit/53ca1beae10f1fcab38c2c3c94c6b75aaad0757a))
+* **sdks:** bump install snippets + READMEs for v0.16.0 / v0.12.0 release ([9bcb424](https://github.com/Kraty-Org/Kraty/commit/9bcb42492e71114205f58d9a193e6d17554abde7))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+
+## [0.16.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.15.0...sdk-server-typescript-v0.16.0) (2026-08-24)
+
+
+### Features
+
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **friends:** player social graph — friend codes, requests, presence, blocking ([4430123](https://github.com/Kraty-Org/Kraty/commit/4430123e34264b40910f538f32d431453d15a042))
+* **friends:** social graph + matchmade-session score fix + Sessions tab ([f347a22](https://github.com/Kraty-Org/Kraty/commit/f347a220ec65fd38b5db7eed2b7dfb324405479d))
+* **players:** per-player synthetic-identity override (server SDK + admin + portal + docs) ([906fd8c](https://github.com/Kraty-Org/Kraty/commit/906fd8c74cab043b5c5fcca5150dbf594a341e79))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+* **social:** friend gifting — send items and currencies to friends ([83962f9](https://github.com/Kraty-Org/Kraty/commit/83962f9988f6b932a89e9f975f9464302632177a))
+* **social:** friend gifting — send items and currencies to friends ([341ec76](https://github.com/Kraty-Org/Kraty/commit/341ec76009435a516bc71e359e4bc9bd826f9a55))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+* **leaderboards:** merge server-derived country on direct-score paths ([72ff4a7](https://github.com/Kraty-Org/Kraty/commit/72ff4a75428f4f9ac952ccfc65b7649d75d3193f))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+* **sdks:** bump install snippets — clients v0.24.0, server-ts v0.14.0 ([c9e9d83](https://github.com/Kraty-Org/Kraty/commit/c9e9d83c402d8af1d285093d5faec415cdf4e500))
+* **sdks:** bump install snippets — clients v0.25.0, server-ts v0.15.0, server-py v0.14.0 ([5c114d8](https://github.com/Kraty-Org/Kraty/commit/5c114d83e2c611ba6267cbb00bce5435decdc0cd))
+* **sdks:** bump install snippets — clients v0.26.0, server-ts v0.16.0, server-py v0.15.0 ([e1581ce](https://github.com/Kraty-Org/Kraty/commit/e1581ceee55c65a4ee07cfa81587c221bcd1060d))
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs for the v0.13.0 / v0.9.0 release ([79ee827](https://github.com/Kraty-Org/Kraty/commit/79ee8271b43a8b5d299bcb94aa91ccea21459820))
+* **sdks:** bump install snippets + READMEs for the v0.14.0 / v0.10.0 release ([87797b6](https://github.com/Kraty-Org/Kraty/commit/87797b602f0bbbdca10f8ca6d34b4309d51be06b))
+* **sdks:** bump install snippets + READMEs for v0.15.0 / v0.11.0 release ([53ca1be](https://github.com/Kraty-Org/Kraty/commit/53ca1beae10f1fcab38c2c3c94c6b75aaad0757a))
+* **sdks:** bump install snippets + READMEs for v0.16.0 / v0.12.0 release ([9bcb424](https://github.com/Kraty-Org/Kraty/commit/9bcb42492e71114205f58d9a193e6d17554abde7))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+
+## [0.15.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.14.0...sdk-server-typescript-v0.15.0) (2026-08-21)
+
+
+### Features
+
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **friends:** player social graph — friend codes, requests, presence, blocking ([4430123](https://github.com/Kraty-Org/Kraty/commit/4430123e34264b40910f538f32d431453d15a042))
+* **friends:** social graph + matchmade-session score fix + Sessions tab ([f347a22](https://github.com/Kraty-Org/Kraty/commit/f347a220ec65fd38b5db7eed2b7dfb324405479d))
+* **players:** per-player synthetic-identity override (server SDK + admin + portal + docs) ([906fd8c](https://github.com/Kraty-Org/Kraty/commit/906fd8c74cab043b5c5fcca5150dbf594a341e79))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+* **social:** friend gifting — send items and currencies to friends ([83962f9](https://github.com/Kraty-Org/Kraty/commit/83962f9988f6b932a89e9f975f9464302632177a))
+* **social:** friend gifting — send items and currencies to friends ([341ec76](https://github.com/Kraty-Org/Kraty/commit/341ec76009435a516bc71e359e4bc9bd826f9a55))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+* **leaderboards:** merge server-derived country on direct-score paths ([72ff4a7](https://github.com/Kraty-Org/Kraty/commit/72ff4a75428f4f9ac952ccfc65b7649d75d3193f))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+* **sdks:** bump install snippets — clients v0.24.0, server-ts v0.14.0 ([c9e9d83](https://github.com/Kraty-Org/Kraty/commit/c9e9d83c402d8af1d285093d5faec415cdf4e500))
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs for the v0.13.0 / v0.9.0 release ([79ee827](https://github.com/Kraty-Org/Kraty/commit/79ee8271b43a8b5d299bcb94aa91ccea21459820))
+* **sdks:** bump install snippets + READMEs for the v0.14.0 / v0.10.0 release ([87797b6](https://github.com/Kraty-Org/Kraty/commit/87797b602f0bbbdca10f8ca6d34b4309d51be06b))
+* **sdks:** bump install snippets + READMEs for v0.15.0 / v0.11.0 release ([53ca1be](https://github.com/Kraty-Org/Kraty/commit/53ca1beae10f1fcab38c2c3c94c6b75aaad0757a))
+* **sdks:** bump install snippets + READMEs for v0.16.0 / v0.12.0 release ([9bcb424](https://github.com/Kraty-Org/Kraty/commit/9bcb42492e71114205f58d9a193e6d17554abde7))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+
+## [0.14.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.13.0...sdk-server-typescript-v0.14.0) (2026-08-17)
+
+
+### Features
+
+* **social:** friend gifting — send items and currencies to friends ([83962f9](https://github.com/Kraty-Org/Kraty/commit/83962f9988f6b932a89e9f975f9464302632177a))
+* **social:** friend gifting — send items and currencies to friends ([341ec76](https://github.com/Kraty-Org/Kraty/commit/341ec76009435a516bc71e359e4bc9bd826f9a55))
+
+
+### Documentation
+
+* **sdks:** bump install snippets — clients v0.24.0, server-ts v0.14.0 ([c9e9d83](https://github.com/Kraty-Org/Kraty/commit/c9e9d83c402d8af1d285093d5faec415cdf4e500))
+
+## [0.13.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.12.0...sdk-server-typescript-v0.13.0) (2026-07-17)
+
+
+### Features
+
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **friends:** player social graph — friend codes, requests, presence, blocking ([4430123](https://github.com/Kraty-Org/Kraty/commit/4430123e34264b40910f538f32d431453d15a042))
+* **friends:** social graph + matchmade-session score fix + Sessions tab ([f347a22](https://github.com/Kraty-Org/Kraty/commit/f347a220ec65fd38b5db7eed2b7dfb324405479d))
+* **players:** per-player synthetic-identity override (server SDK + admin + portal + docs) ([906fd8c](https://github.com/Kraty-Org/Kraty/commit/906fd8c74cab043b5c5fcca5150dbf594a341e79))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+* **leaderboards:** merge server-derived country on direct-score paths ([72ff4a7](https://github.com/Kraty-Org/Kraty/commit/72ff4a75428f4f9ac952ccfc65b7649d75d3193f))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs for the v0.13.0 / v0.9.0 release ([79ee827](https://github.com/Kraty-Org/Kraty/commit/79ee8271b43a8b5d299bcb94aa91ccea21459820))
+* **sdks:** bump install snippets + READMEs for the v0.14.0 / v0.10.0 release ([87797b6](https://github.com/Kraty-Org/Kraty/commit/87797b602f0bbbdca10f8ca6d34b4309d51be06b))
+* **sdks:** bump install snippets + READMEs for v0.15.0 / v0.11.0 release ([53ca1be](https://github.com/Kraty-Org/Kraty/commit/53ca1beae10f1fcab38c2c3c94c6b75aaad0757a))
+* **sdks:** bump install snippets + READMEs for v0.16.0 / v0.12.0 release ([9bcb424](https://github.com/Kraty-Org/Kraty/commit/9bcb42492e71114205f58d9a193e6d17554abde7))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+
+## [0.12.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.11.0...sdk-server-typescript-v0.12.0) (2026-07-17)
+
+
+### Features
+
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **players:** per-player synthetic-identity override (server SDK + admin + portal + docs) ([906fd8c](https://github.com/Kraty-Org/Kraty/commit/906fd8c74cab043b5c5fcca5150dbf594a341e79))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+* **leaderboards:** merge server-derived country on direct-score paths ([72ff4a7](https://github.com/Kraty-Org/Kraty/commit/72ff4a75428f4f9ac952ccfc65b7649d75d3193f))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs for the v0.13.0 / v0.9.0 release ([79ee827](https://github.com/Kraty-Org/Kraty/commit/79ee8271b43a8b5d299bcb94aa91ccea21459820))
+* **sdks:** bump install snippets + READMEs for the v0.14.0 / v0.10.0 release ([87797b6](https://github.com/Kraty-Org/Kraty/commit/87797b602f0bbbdca10f8ca6d34b4309d51be06b))
+* **sdks:** bump install snippets + READMEs for v0.15.0 / v0.11.0 release ([53ca1be](https://github.com/Kraty-Org/Kraty/commit/53ca1beae10f1fcab38c2c3c94c6b75aaad0757a))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+
+## [0.11.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.10.0...sdk-server-typescript-v0.11.0) (2026-07-16)
+
+
+### Features
+
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **players:** per-player synthetic-identity override (server SDK + admin + portal + docs) ([906fd8c](https://github.com/Kraty-Org/Kraty/commit/906fd8c74cab043b5c5fcca5150dbf594a341e79))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+* **leaderboards:** merge server-derived country on direct-score paths ([72ff4a7](https://github.com/Kraty-Org/Kraty/commit/72ff4a75428f4f9ac952ccfc65b7649d75d3193f))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs for the v0.13.0 / v0.9.0 release ([79ee827](https://github.com/Kraty-Org/Kraty/commit/79ee8271b43a8b5d299bcb94aa91ccea21459820))
+* **sdks:** bump install snippets + READMEs for the v0.14.0 / v0.10.0 release ([87797b6](https://github.com/Kraty-Org/Kraty/commit/87797b602f0bbbdca10f8ca6d34b4309d51be06b))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+
+## [0.10.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.9.0...sdk-server-typescript-v0.10.0) (2026-07-16)
+
+
+### Features
+
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **players:** per-player synthetic-identity override (server SDK + admin + portal + docs) ([906fd8c](https://github.com/Kraty-Org/Kraty/commit/906fd8c74cab043b5c5fcca5150dbf594a341e79))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+* **leaderboards:** merge server-derived country on direct-score paths ([72ff4a7](https://github.com/Kraty-Org/Kraty/commit/72ff4a75428f4f9ac952ccfc65b7649d75d3193f))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs for the v0.13.0 / v0.9.0 release ([79ee827](https://github.com/Kraty-Org/Kraty/commit/79ee8271b43a8b5d299bcb94aa91ccea21459820))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+
+## [0.9.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.8.0...sdk-server-typescript-v0.9.0) (2026-07-16)
+
+
+### Features
+
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **players:** per-player synthetic-identity override (server SDK + admin + portal + docs) ([906fd8c](https://github.com/Kraty-Org/Kraty/commit/906fd8c74cab043b5c5fcca5150dbf594a341e79))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+* **leaderboards:** merge server-derived country on direct-score paths ([72ff4a7](https://github.com/Kraty-Org/Kraty/commit/72ff4a75428f4f9ac952ccfc65b7649d75d3193f))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+
+## [0.8.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.7.0...sdk-server-typescript-v0.8.0) (2026-07-15)
+
+
+### Features
+
+* **players:** per-player synthetic-identity override (server SDK + admin + portal + docs) ([906fd8c](https://github.com/Kraty-Org/Kraty/commit/906fd8c74cab043b5c5fcca5150dbf594a341e79))
+
+
+### Bug Fixes
+
+* **leaderboards:** merge server-derived country on direct-score paths ([72ff4a7](https://github.com/Kraty-Org/Kraty/commit/72ff4a75428f4f9ac952ccfc65b7649d75d3193f))
+
+
+### Documentation
+
+* **sdks:** bump install snippets + READMEs for the v0.11.0 / v0.8.0 release ([8cafc26](https://github.com/Kraty-Org/Kraty/commit/8cafc26a6d7618c700b9177bedb6471d29efcfc7))
+* **sdks:** bump install snippets + READMEs to match the release-please tag versions ([c66ffaf](https://github.com/Kraty-Org/Kraty/commit/c66ffaf27e1ac495957067003a411df8857a1c53))
+
+## [0.7.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.6.0...sdk-server-typescript-v0.7.0) (2026-07-12)
+
+
+### Features
+
+* finish an attempt now (player "end my run") across API + all SDKs ([f1ba2a0](https://github.com/Kraty-Org/Kraty/commit/f1ba2a0fa56a51a513bdbc865dd4ea9d854a8a65))
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+* **sdk:** surface synthetic identity + align progress verb across SDKs ([6e346f7](https://github.com/Kraty-Org/Kraty/commit/6e346f7328a3f58dd08d51f5f7d15c93e013aba6))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+
+## [0.5.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.4.0...sdk-server-typescript-v0.5.0) (2026-07-09)
+
+
+### Features
+
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+
+## [0.4.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.3.0...sdk-server-typescript-v0.4.0) (2026-07-06)
+
+
+### Features
+
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+
+## [0.3.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.2.0...sdk-server-typescript-v0.3.0) (2026-07-02)
+
+
+### Features
+
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+
+## [0.2.0](https://github.com/Kraty-Org/Kraty/compare/sdk-server-typescript-v0.1.0...sdk-server-typescript-v0.2.0) (2026-06-29)
+
+
+### Features
+
+* **sdks:** leaderboard submitScore (client TS/Unity/Flutter) + server scoring/progress ([02f4e69](https://github.com/Kraty-Org/Kraty/commit/02f4e6944813639ca19349ff1a9c28c92e6aa62f))
+
+
+### Bug Fixes
+
+* **ci:** repair all workflows after SDK restructure to client/server/ ([85f0524](https://github.com/Kraty-Org/Kraty/commit/85f0524ef1777240e04d96dd34dee3ec37ed7315))
+
+
+### Documentation
+
+* rewrite root README + point every SDK README at kraty.io/docs ([0bb9b13](https://github.com/Kraty-Org/Kraty/commit/0bb9b1385ef8803aaf2f67a3a63ea746ca4b6e12))
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

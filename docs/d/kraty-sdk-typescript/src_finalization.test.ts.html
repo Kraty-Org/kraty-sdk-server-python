@@ -1,0 +1,223 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-typescript/src/finalization.test.ts</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-typescript/src/finalization.test.ts</h1><p class=muted>kraty-sdk-typescript/src/finalization.test.ts</p><pre><code class="language-typescript">import { describe, expect, it, vi } from 'vitest';
+import {
+  FinalizationTracker,
+  FinalizationReason,
+  InMemoryMembershipStore,
+  MembershipKind,
+  StandingKind,
+  type FinalizationReason as FinalizationReasonT,
+  type FinalizationResult,
+  type FinalStanding,
+} from './finalization.js';
+
+function makeTracker(opts?: {
+  finalized?: boolean;
+  reason?: FinalizationReasonT | null;
+  self?: { rank: number; score: number } | null;
+  standings?: FinalStanding[];
+}) {
+  const store = new InMemoryMembershipStore();
+  const readEventLeaderboard = vi.fn(async () =&gt; ({
+    finalized: opts?.finalized ?? false,
+    reason: opts?.reason ?? null,
+    self: opts?.self ?? { rank: 3, score: 42 },
+    ...(opts?.standings ? { standings: opts.standings } : {}),
+  }));
+  const tracker = new FinalizationTracker({
+    store,
+    getActivePlayerId: async () =&gt; 'p1',
+    readEventLeaderboard,
+  });
+  const fired: FinalizationResult[] = [];
+  tracker.onFinalized((r) =&gt; fired.push(r));
+  return { store, tracker, readEventLeaderboard, fired };
+}
+
+const REF = { kind: MembershipKind.EventLeaderboard, leaderboardId: 'lb-1', eventKey: 'daily' };
+
+describe('FinalizationTracker.track', () =&gt; {
+  it('is an idempotent upsert', async () =&gt; {
+    const { store, tracker } = makeTracker();
+    await tracker.track(REF);
+    await tracker.track(REF);
+    const entries = await store.load('p1');
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ status: 'active', ref: REF });
+  });
+});
+
+describe('the SSE path writes the registry (core invariant)', () =&gt; {
+  it('onStreamFinalized marks the entry finalized + reportedAt AND fires once', async () =&gt; {
+    const { store, tracker, fired } = makeTracker();
+    await tracker.track(REF);
+
+    await tracker.onStreamFinalized('lb-1', {
+      reason: 'session_terminated',
+      standings: [{ participantId: 'x', rank: 1, score: 5, name: 'A', kind: 'player' }],
+    });
+
+    // Registry updated (not just the callback).
+    const entry = (await store.load('p1'))[0]!;
+    expect(entry.status).toBe('finalized');
+    expect(entry.reportedAt).toBeTruthy();
+    // Callback fired exactly once with the SSE reason.
+    expect(fired).toHaveLength(1);
+    expect(fired[0]!.reason).toBe('session_terminated');
+    // The live SSE frame carries no eventKey; the result must still expose it
+    // (routed from the tracked ref) so callers can `switch (result.eventKey)`.
+    // Regression: previously the live path delivered eventKey: undefined.
+    expect(fired[0]!.eventKey).toBe('daily');
+    // And the standings ("board status at finalization") come through.
+    expect(fired[0]!.standings).toHaveLength(1);
+  });
+
+  it('a later checkFinalizations does NOT re-fire what the SSE already resolved', async () =&gt; {
+    const { tracker, fired, readEventLeaderboard } = makeTracker({ finalized: true });
+    await tracker.track(REF);
+
+    // SSE resolves it first.
+    await tracker.onStreamFinalized('lb-1', { reason: 'window_closed' });
+    expect(fired).toHaveLength(1);
+
+    // Catch-up now sees a finalized board, but the entry is already reported.
+    const newlyFinalized = await tracker.checkFinalizations();
+    expect(newlyFinalized).toEqual([]); // no re-report
+    expect(fired).toHaveLength(1); // still one
+    // (readEventLeaderboard may be consulted, but the writer no-ops on reportedAt.)
+    void readEventLeaderboard;
+  });
+});
+
+describe('checkFinalizations (catch-up path)', () =&gt; {
+  it('fires once for a board that finalized while away, then never again', async () =&gt; {
+    const { tracker, fired } = makeTracker({ finalized: true, self: { rank: 2, score: 99 } });
+    await tracker.track(REF);
+
+    const first = await tracker.checkFinalizations();
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({ self: { rank: 2, score: 99 }, eventKey: 'daily' });
+    expect(fired).toHaveLength(1);
+
+    const second = await tracker.checkFinalizations();
+    expect(second).toEqual([]); // dedupe
+    expect(fired).toHaveLength(1);
+  });
+
+  it('threads the persisted reason through (session vs window)', async () =&gt; {
+    const session = makeTracker({ finalized: true, reason: FinalizationReason.SessionTerminated });
+    await session.tracker.track(REF);
+    const s = await session.tracker.checkFinalizations();
+    expect(s[0]!.reason).toBe(FinalizationReason.SessionTerminated);
+
+    const window = makeTracker({ finalized: true, reason: FinalizationReason.WindowClosed });
+    await window.tracker.track(REF);
+    const w = await window.tracker.checkFinalizations();
+    expect(w[0]!.reason).toBe(FinalizationReason.WindowClosed);
+  });
+
+  it('falls back to Finalized when the read gives no reason', async () =&gt; {
+    const { tracker } = makeTracker({ finalized: true, reason: null });
+    await tracker.track(REF);
+    const out = await tracker.checkFinalizations();
+    expect(out[0]!.reason).toBe(FinalizationReason.Finalized);
+  });
+
+  it('ignores still-active boards', async () =&gt; {
+    const { tracker, fired } = makeTracker({ finalized: false });
+    await tracker.track(REF);
+    expect(await tracker.checkFinalizations()).toEqual([]);
+    expect(fired).toHaveLength(0);
+  });
+});
+
+describe('standings carry avatar + isSelf (server-resolved via the board read)', () =&gt; {
+  const rich: FinalStanding[] = [
+    { participantId: 'me', rank: 1, score: 5, name: 'Me', kind: StandingKind.Player, avatar: 'a-me', isSelf: true },
+    { participantId: 'bot1', rank: 2, score: 4, name: 'Bot', kind: StandingKind.Bot, avatar: 'a-bot', isSelf: false },
+  ];
+
+  it('onStreamFinalized enriches from the read (avatar + isSelf), not just the broadcast', async () =&gt; {
+    const { tracker, fired, readEventLeaderboard } = makeTracker({
+      finalized: true,
+      self: { rank: 1, score: 5 },
+      standings: rich,
+    });
+    await tracker.track(REF);
+
+    // Broadcast standings are minimal (no avatar/isSelf); the read must win.
+    await tracker.onStreamFinalized('lb-1', {
+      reason: 'session_terminated',
+      standings: [{ participantId: 'me', rank: 1, score: 5, name: 'Me', kind: 'player' }],
+    });
+
+    expect(readEventLeaderboard).toHaveBeenCalledWith('lb-1');
+    expect(fired).toHaveLength(1);
+    const s = fired[0]!.standings!;
+    expect(s[0]).toMatchObject({ participantId: 'me', avatar: 'a-me', isSelf: true });
+    expect(s[1]).toMatchObject({ participantId: 'bot1', avatar: 'a-bot', isSelf: false });
+    expect(fired[0]!.self).toEqual({ rank: 1, score: 5 });
+    expect(fired[0]!.reason).toBe('session_terminated'); // precise SSE reason kept
+  });
+
+  it('checkFinalizations returns standings with avatar + isSelf', async () =&gt; {
+    const { tracker, fired } = makeTracker({ finalized: true, standings: rich });
+    await tracker.track(REF);
+    const out = await tracker.checkFinalizations();
+    expect(out[0]!.standings![0]).toMatchObject({ avatar: 'a-me', isSelf: true });
+    expect(fired[0]!.standings![0]).toMatchObject({ avatar: 'a-me', isSelf: true });
+  });
+
+  it('falls back to the broadcast standings when the read has none', async () =&gt; {
+    const { tracker, fired } = makeTracker({ finalized: true }); // no standings from read
+    await tracker.track(REF);
+    await tracker.onStreamFinalized('lb-1', {
+      reason: 'window_closed',
+      standings: [{ participantId: 'me', rank: 1, score: 5, name: 'Me', kind: 'player' }],
+    });
+    expect(fired[0]!.standings).toHaveLength(1);
+    expect(fired[0]!.standings![0]).toMatchObject({ participantId: 'me' });
+  });
+});
+
+describe('dismiss / clearReported', () =&gt; {
+  it('dismiss removes a membership so it never resurfaces', async () =&gt; {
+    const { store, tracker } = makeTracker({ finalized: true });
+    await tracker.track(REF);
+    await tracker.dismiss(REF);
+    expect(await store.load('p1')).toEqual([]);
+    // Even though the board is finalized, a check finds nothing tracked.
+    expect(await tracker.checkFinalizations()).toEqual([]);
+  });
+
+  it('clearReported drops delivered entries but keeps active ones', async () =&gt; {
+    const { store, tracker } = makeTracker({ finalized: true });
+    await tracker.track(REF); // will be reported
+    await tracker.track({ kind: 'event_leaderboard', leaderboardId: 'lb-2' }); // stays active
+    await tracker.onStreamFinalized('lb-1', { reason: 'window_closed' });
+
+    const removed = await tracker.clearReported();
+    expect(removed).toBe(1);
+    const left = await store.load('p1');
+    expect(left).toHaveLength(1);
+    expect(left[0]!.ref).toMatchObject({ leaderboardId: 'lb-2' });
+  });
+});
+
+describe('serialization', () =&gt; {
+  it('concurrent SSE + checkFinalizations resolve exactly once', async () =&gt; {
+    const { tracker, fired } = makeTracker({ finalized: true });
+    await tracker.track(REF);
+
+    // Fire both without awaiting between them; the internal queue must
+    // serialize so only one passes the reportedAt guard.
+    await Promise.all([
+      tracker.onStreamFinalized('lb-1', { reason: 'session_terminated' }),
+      tracker.checkFinalizations(),
+    ]);
+
+    expect(fired).toHaveLength(1);
+  });
+});
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

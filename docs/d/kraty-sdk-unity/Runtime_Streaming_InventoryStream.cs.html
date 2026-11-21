@@ -1,0 +1,253 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-unity/Runtime/Streaming/InventoryStream.cs</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-unity/Runtime/Streaming/InventoryStream.cs</h1><p class=muted>kraty-sdk-unity/Runtime/Streaming/InventoryStream.cs</p><pre><code class="language-csharp">using System;
+using System.Collections.Generic;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+using Newtonsoft.Json.Linq;
+
+namespace Kraty
+{
+    /// &lt;summary&gt;Who caused an inventory change.&lt;/summary&gt;
+    public static class InventoryEventOrigin
+    {
+        public const string Client = "client";
+        public const string Server = "server";
+        public const string Admin = "admin";
+        public const string Engine = "engine";
+    }
+
+    /// &lt;summary&gt;
+    /// One event off the inventory stream. &lt;see cref="Kind"/&gt; is the SSE
+    /// &lt;c&gt;event:&lt;/c&gt; line:
+    /// &lt;list type="bullet"&gt;
+    /// &lt;item&gt;&lt;description&gt;&lt;c&gt;ready&lt;/c&gt;: handshake, once the subscription is wired.&lt;/description&gt;&lt;/item&gt;
+    /// &lt;item&gt;&lt;description&gt;&lt;c&gt;inventory_changed&lt;/c&gt;: an item quantity moved.&lt;/description&gt;&lt;/item&gt;
+    /// &lt;item&gt;&lt;description&gt;&lt;c&gt;wallet_changed&lt;/c&gt;: a currency / progression balance moved.&lt;/description&gt;&lt;/item&gt;
+    /// &lt;item&gt;&lt;description&gt;&lt;c&gt;grant_created&lt;/c&gt;: a reward became claimable.&lt;/description&gt;&lt;/item&gt;
+    /// &lt;/list&gt;
+    /// The typed properties cover the common fields; read &lt;see cref="Data"/&gt;
+    /// directly for anything a newer backend adds.
+    /// &lt;/summary&gt;
+    public sealed class InventoryStreamEvent
+    {
+        public string Kind { get; }
+        public Dictionary&lt;string, JToken&gt; Data { get; }
+
+        public InventoryStreamEvent(string kind, Dictionary&lt;string, JToken&gt; data)
+        {
+            Kind = kind;
+            Data = data;
+        }
+
+        /// &lt;summary&gt;&lt;c&gt;client&lt;/c&gt; / &lt;c&gt;server&lt;/c&gt; / &lt;c&gt;admin&lt;/c&gt; / &lt;c&gt;engine&lt;/c&gt;; empty on &lt;c&gt;ready&lt;/c&gt;.&lt;/summary&gt;
+        public string Origin =&gt; Str("origin");
+
+        /// &lt;summary&gt;Set on &lt;c&gt;inventory_changed&lt;/c&gt;.&lt;/summary&gt;
+        public string ItemKey =&gt; Str("itemKey");
+
+        /// &lt;summary&gt;Set on &lt;c&gt;wallet_changed&lt;/c&gt;.&lt;/summary&gt;
+        public string EconomyKey =&gt; Str("economyKey");
+
+        /// &lt;summary&gt;Signed change; negative for a consume. 0 when not applicable.&lt;/summary&gt;
+        public int Delta =&gt; Int("delta");
+
+        /// &lt;summary&gt;Quantity AFTER the change (&lt;c&gt;inventory_changed&lt;/c&gt;).&lt;/summary&gt;
+        public int Quantity =&gt; Int("quantity");
+
+        /// &lt;summary&gt;Balance AFTER the change (&lt;c&gt;wallet_changed&lt;/c&gt;).&lt;/summary&gt;
+        public int Balance =&gt; Int("balance");
+
+        /// &lt;summary&gt;Ledger reason (&lt;c&gt;grant_deposit&lt;/c&gt;, &lt;c&gt;consume&lt;/c&gt;, &lt;c&gt;admin_grant&lt;/c&gt;, …).&lt;/summary&gt;
+        public string Reason =&gt; Str("reason");
+
+        /// &lt;summary&gt;Set on &lt;c&gt;grant_created&lt;/c&gt;; claim it with &lt;c&gt;Grants.CollectAllAsync()&lt;/c&gt;.&lt;/summary&gt;
+        public string GrantId =&gt; Str("grantId");
+
+        /// &lt;summary&gt;True when this event is the echo of a write this client made.&lt;/summary&gt;
+        public bool IsOwnWrite =&gt; Origin == InventoryEventOrigin.Client;
+
+        private string Str(string key) =&gt;
+            Data.TryGetValue(key, out var v) &amp;&amp; v.Type == JTokenType.String
+                ? ((string?)v ?? string.Empty)
+                : string.Empty;
+
+        private int Int(string key) =&gt;
+            Data.TryGetValue(key, out var v) &amp;&amp;
+            (v.Type == JTokenType.Integer || v.Type == JTokenType.Float)
+                ? (int)v
+                : 0;
+    }
+
+    /// &lt;summary&gt;
+    /// Handle to an active inventory subscription. Hook
+    /// &lt;see cref="OnEvent"/&gt; / &lt;see cref="OnError"/&gt;, call
+    /// &lt;see cref="CancelAsync"/&gt; to stop.
+    ///
+    /// &lt;para&gt;
+    /// Callbacks fire on the HTTP background thread. In Unity, marshal to
+    /// the main thread before touching &lt;c&gt;UnityEngine&lt;/c&gt; APIs:
+    /// &lt;/para&gt;
+    /// &lt;code&gt;
+    /// stream.OnEvent = ev =&gt; mainThreadDispatcher.Enqueue(() =&gt; RefreshBackpack(ev));
+    /// &lt;/code&gt;
+    ///
+    /// &lt;para&gt;
+    /// Reconnects on its own by default (&lt;see cref="StreamOptions.AutoReconnect"/&gt;):
+    /// after a server &lt;c&gt;close&lt;/c&gt;, a drop, a busy server or 40 s of silence
+    /// it reopens, re-delivering &lt;c&gt;ready&lt;/c&gt;; &lt;see cref="OnConnection"/&gt;
+    /// reports it. Changes made while reconnecting are not replayed: re-read
+    /// on &lt;c&gt;Connected&lt;/c&gt;. With &lt;c&gt;AutoReconnect = false&lt;/c&gt;, surface errors
+    /// via &lt;see cref="OnError"/&gt; and re-invoke
+    /// &lt;see cref="InventoryClient.LiveAsync"/&gt; after a backoff yourself.
+    /// &lt;/para&gt;
+    /// &lt;/summary&gt;
+    public sealed class InventoryStream : IDisposable
+    {
+        private readonly CancellationTokenSource _cts;
+        private Task _readLoop = Task.CompletedTask;
+        private readonly HttpResponseMessage? _response;
+        private int _disposed;
+
+        public Action&lt;InventoryStreamEvent&gt;? OnEvent { get; set; }
+        /// &lt;summary&gt;
+        /// Parse failures and exceptions thrown by your callbacks. With
+        /// auto-reconnect (the default) also the error that stopped the stream
+        /// for good (a refused reopen: 401, 404, …); drops are handled for you.
+        /// Without it, transport failures too.
+        /// &lt;/summary&gt;
+        public Action&lt;Exception&gt;? OnError { get; set; }
+        /// &lt;summary&gt;
+        /// Auto-reconnect status: &lt;c&gt;Connected&lt;/c&gt; after every &lt;c&gt;ready&lt;/c&gt;,
+        /// &lt;c&gt;Reconnecting&lt;/c&gt; (reason, delay, attempt) each time the
+        /// connection is lost. Not an error.
+        /// &lt;/summary&gt;
+        public Action&lt;StreamConnectionEvent&gt;? OnConnection { get; set; }
+
+        /// &lt;summary&gt;True when this stream reconnects on its own (&lt;see cref="StreamOptions.AutoReconnect"/&gt;).&lt;/summary&gt;
+        public bool AutoReconnect { get; }
+
+        internal InventoryStream(HttpResponseMessage response, CancellationTokenSource cts, Func&lt;InventoryStream, Task&gt; startReadLoop)
+        {
+            _response = response;
+            _cts = cts;
+            // Start the read loop on the threadpool; it runs until the
+            // server closes the stream OR the consumer cancels.
+            _readLoop = Task.Run(() =&gt; startReadLoop(this));
+        }
+
+        // Auto-reconnect: the loop owns the connections; Start runs it once
+        // the caller's callbacks are wired.
+        internal InventoryStream(CancellationTokenSource cts)
+        {
+            _cts = cts;
+            AutoReconnect = true;
+        }
+
+        internal void Start(Func&lt;Task&gt; loop)
+        {
+            _readLoop = Task.Run(loop);
+        }
+
+        /// &lt;summary&gt;
+        /// Cancels the subscription + closes the HTTP socket. Idempotent.
+        /// &lt;/summary&gt;
+        public async Task CancelAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
+            try { _cts.Cancel(); } catch { /* swallow */ }
+            try { await _readLoop.ConfigureAwait(false); } catch { /* swallow */ }
+            try { _response?.Dispose(); } catch { /* swallow */ }
+            try { _cts.Dispose(); } catch { /* swallow */ }
+        }
+
+        public void Dispose()
+        {
+            _ = CancelAsync();
+        }
+
+        internal void EmitEvent(InventoryStreamEvent ev)
+        {
+            try { OnEvent?.Invoke(ev); }
+            catch (Exception cbErr) { try { OnError?.Invoke(cbErr); } catch { /* swallow */ } }
+        }
+
+        internal void EmitError(Exception err)
+        {
+            try { OnError?.Invoke(err); } catch { /* swallow */ }
+        }
+
+        internal void EmitConnection(StreamConnectionEvent ev)
+        {
+            try { OnConnection?.Invoke(ev); }
+            catch (Exception cbErr) { EmitError(cbErr); }
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// Opens an SSE subscription to a player's inventory / wallet / grants.
+    /// Auto-reconnects (see &lt;see cref="StreamOptions"/&gt;) unless told not to.
+    /// Transport + parsing live in &lt;see cref="SseReader"/&gt;.
+    /// &lt;/summary&gt;
+    internal static class InventoryStreamFactory
+    {
+        public static async Task&lt;InventoryStream&gt; OpenAsync(
+            HttpClient http,
+            string baseUrl,
+            string externalPlayerId,
+            string authHeader,
+            string? playerSecret,
+            CancellationToken cancellationToken,
+            StreamOptions? options = null,
+            Action&lt;InventoryStream&gt;? configure = null
+        )
+        {
+            var url = $"{baseUrl}/sdk/v1/players/{Uri.EscapeDataString(externalPlayerId)}/inventory/stream";
+            options ??= new StreamOptions();
+            Task&lt;HttpResponseMessage&gt; Open(CancellationToken token) =&gt;
+                SseReader.OpenAsync(http, url, authHeader, playerSecret, "inventory stream", token);
+
+            if (!options.AutoReconnect)
+            {
+                var response = await Open(cancellationToken).ConfigureAwait(false);
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var single = new InventoryStream(response, cts, (self) =&gt;
+                    SseReader.PumpAsync(
+                        response,
+                        cts,
+                        (kind, data) =&gt; self.EmitEvent(new InventoryStreamEvent(kind, data)),
+                        self.EmitError
+                    )
+                );
+                configure?.Invoke(single);
+                return single;
+            }
+
+            var autoCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var stream = new InventoryStream(autoCts);
+            (HttpResponseMessage? Response, Exception? Error) first;
+            try
+            {
+                configure?.Invoke(stream);
+                first = await SseReconnectLoop.OpenFirstAsync(Open, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                autoCts.Dispose();
+                throw;
+            }
+            var loop = new SseReconnectLoop
+            {
+                Open = Open,
+                Deliver = (kind, data) =&gt; stream.EmitEvent(new InventoryStreamEvent(kind, data)),
+                Status = stream.EmitConnection,
+                Error = stream.EmitError,
+                Options = options,
+            };
+            stream.Start(() =&gt; loop.RunAsync(first.Response, first.Error, autoCts.Token));
+            return stream;
+        }
+    }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

@@ -1,0 +1,123 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-flutter/lib/src/leaderboard_stream.dart</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-flutter/lib/src/leaderboard_stream.dart</h1><p class=muted>kraty-sdk-flutter/lib/src/leaderboard_stream.dart</p><pre><code class="language-dart">import 'dart:async';
+
+import 'package:http/http.dart' as http;
+
+import 'reconnecting_sse.dart';
+import 'sse.dart';
+
+/// One event emitted by the leaderboard SSE stream.
+/// [kind] is the SSE `event:` line. Typically:
+///   - `ready`: handshake, sent once after the subscription is wired
+///   - `score_update`: a participant's score / rank changed
+///   - `finalized`: the board ended (a session/lobby terminated, or the
+///     event window closed). [data] carries `reason`
+///     (`session_terminated` | `window_closed`) and `standings`
+///     (a list of `{participantId, rank, score, name, kind}`). Find the
+///     caller by `participantId` to show their placement, then stop
+///     expecting `score_update`s.
+///   - `closed`: the board ended for good (`reason: finalized`); the
+///     stream ends after it and never reconnects
+///   - `close`: the server is draining this connection (only delivered
+///     with `autoReconnect: false`; the default stream reconnects itself)
+///
+/// [data] is the parsed `data:` JSON line (or null if it didn't parse).
+class LeaderboardStreamEvent {
+  final String kind;
+  final Map&lt;String, Object?&gt; data;
+  const LeaderboardStreamEvent({required this.kind, required this.data});
+}
+
+/// Handle to an active SSE subscription. Call [cancel] to stop.
+///
+/// By default the stream heals itself: after a server `close`, a network
+/// drop, a busy server or heartbeat silence it reconnects on its own (no
+/// replay: re-read the board on `connected` if you need exact standings).
+/// It ends for good after `closed`. With `autoReconnect: false` it is a
+/// single connection and [errors] carries transport failures.
+class LeaderboardStream {
+  /// Event stream: yields `ready` / `score_update` / `finalized` /
+  /// `closed` / any future event kinds the server adds. Single-subscriber.
+  final Stream&lt;LeaderboardStreamEvent&gt; events;
+
+  /// With auto-reconnect: fatal errors only (the stream ends after one).
+  /// Without: transport failures (network drop, server crash
+  /// mid-stream); re-invoke `live(...)` after a backoff. Broadcast.
+  final Stream&lt;Object&gt; errors;
+
+  /// Connection status (`connected` / `reconnecting`); see
+  /// [KratyConnectionEvent]. Single-subscriber and buffered. Empty with
+  /// `autoReconnect: false`.
+  final Stream&lt;KratyConnectionEvent&gt; connection;
+
+  final KratyConnectionState Function() _state;
+  final Future&lt;void&gt; Function() _cancel;
+
+  LeaderboardStream._(
+    this.events,
+    this.errors,
+    this.connection,
+    this._state,
+    this._cancel,
+  );
+
+  /// The current connection state. Always `connected` with
+  /// `autoReconnect: false`.
+  KratyConnectionState get connectionState =&gt; _state();
+
+  /// Cancels the subscription, closes the HTTP socket and cancels any
+  /// pending reconnect. Idempotent, so it's safe to call after the server
+  /// emits `closed`.
+  Future&lt;void&gt; cancel() =&gt; _cancel();
+}
+
+/// Opens an SSE subscription to a leaderboard. Returns a
+/// [LeaderboardStream] handle the caller drives via its event/error
+/// streams. With [autoReconnect] it reconnects itself (never after
+/// `closed`); without, a single connection.
+///
+/// The SSE framing itself is parsed by the shared reader in `sse.dart`;
+/// this only maps the generic events onto the leaderboard-shaped type.
+Future&lt;LeaderboardStream&gt; openLeaderboardStream({
+  required String baseUrl,
+  required String leaderboardId,
+  required String authHeader,
+  required http.Client httpClient,
+  required String sdkUserAgent,
+  String? playerSecret,
+  String? Function()? currentPlayerSecret,
+  bool autoReconnect = false,
+  Duration heartbeatTimeout = const Duration(seconds: 40),
+}) async {
+  Future&lt;SseStream&gt; connect({void Function()? onActivity}) =&gt; openSseStream(
+        baseUrl: baseUrl,
+        path: '/sdk/v1/event-leaderboards/$leaderboardId/stream',
+        authHeader: authHeader,
+        httpClient: httpClient,
+        sdkUserAgent: sdkUserAgent,
+        label: 'leaderboard stream',
+        playerSecret: currentPlayerSecret?.call() ?? playerSecret,
+        onActivity: onActivity,
+      );
+  LeaderboardStreamEvent map(SseEvent e) =&gt; LeaderboardStreamEvent(kind: e.kind, data: e.data);
+
+  if (!autoReconnect) {
+    final raw = await connect();
+    return LeaderboardStream._(
+      raw.events.map(map),
+      raw.errors,
+      const Stream&lt;KratyConnectionEvent&gt;.empty(),
+      () =&gt; KratyConnectionState.connected,
+      raw.cancel,
+    );
+  }
+  final core = ReconnectingSse(
+    connect: (onActivity) =&gt; connect(onActivity: onActivity),
+    heartbeatTimeout: heartbeatTimeout,
+    isTerminal: (e) =&gt; e.kind == 'closed',
+  );
+  await core.start();
+  return LeaderboardStream._(core.events.map(map), core.errors, core.connection, () =&gt; core.state, core.cancel);
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

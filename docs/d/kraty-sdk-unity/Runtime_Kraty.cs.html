@@ -1,0 +1,286 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-unity/Runtime/Kraty.cs</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-unity/Runtime/Kraty.cs</h1><p class=muted>kraty-sdk-unity/Runtime/Kraty.cs</p><pre><code class="language-csharp">using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Kraty
+{
+    /// &lt;summary&gt;
+    /// Convenience facade: instantiate one &lt;see cref="Kraty"/&gt; instead
+    /// of wiring &lt;see cref="KratyClient"/&gt; + each resource client by
+    /// hand. All resource clients share the same underlying
+    /// &lt;see cref="KratyClient"/&gt; so retry config, telemetry, and the
+    /// HTTP connection pool are shared.
+    ///
+    /// &lt;example&gt;
+    /// &lt;code&gt;&lt;![CDATA[
+    /// using var kraty = new Kraty(new KratyClientOptions {
+    ///     ApiKey = "&lt;your-client-sdk-key&gt;",
+    /// });
+    /// // No id plumbing; the SDK lazily registers a player on the
+    /// // first player-scoped call and persists it via PlayerPrefs.
+    /// var events = await kraty.Events.ListForPlayerAsync();
+    /// ]]&gt;&lt;/code&gt;
+    /// &lt;/example&gt;
+    /// &lt;/summary&gt;
+    public sealed class Kraty : IDisposable
+    {
+        public KratyClient Client { get; }
+        public EventsClient Events { get; }
+        public LeaderboardsClient Leaderboards { get; }
+        public EventLeaderboardsClient EventLeaderboards { get; }
+        public GrantsClient Grants { get; }
+        public LobbiesClient Lobbies { get; }
+        public InventoryClient Inventory { get; }
+        public WalletClient Wallet { get; }
+        public PlayersClient Players { get; }
+        public PurchasesClient Purchases { get; }
+        public FriendsClient Friends { get; }
+        public CatalogClient Catalog { get; }
+        public DailyLoginClient DailyLogin { get; }
+        public GuildsClient Guilds { get; }
+        public OffersClient Offers { get; }
+        public ChatClient Chat { get; }
+        public ModerationClient Moderation { get; }
+
+        public Kraty(KratyClientOptions opts)
+        {
+            Client = new KratyClient(opts);
+            Events = new EventsClient(Client);
+            Leaderboards = new LeaderboardsClient(Client);
+            EventLeaderboards = new EventLeaderboardsClient(Client);
+            Grants = new GrantsClient(Client);
+            Lobbies = new LobbiesClient(Client);
+            Inventory = new InventoryClient(Client);
+            Wallet = new WalletClient(Client);
+            Players = new PlayersClient(Client);
+            Purchases = new PurchasesClient(Client);
+            Friends = new FriendsClient(Client);
+            Catalog = new CatalogClient(Client);
+            DailyLogin = new DailyLoginClient(Client);
+            Guilds = new GuildsClient(Client);
+            Offers = new OffersClient(Client);
+            Chat = new ChatClient(Client);
+            Moderation = new ModerationClient(Client);
+        }
+
+        public void Dispose() =&gt; Client.Dispose();
+
+        /// &lt;summary&gt;
+        /// Record a real-money purchase for the active player.
+        ///
+        /// &lt;para&gt;
+        /// Shorthand for &lt;c&gt;kraty.Purchases.TrackAsync(...)&lt;/c&gt;,
+        /// promoted to the top level because reporting a purchase is a
+        /// one-liner a game does from inside its IAP callback and
+        /// shouldn't have to reach through a namespace for.
+        /// &lt;/para&gt;
+        ///
+        /// &lt;para&gt;
+        /// Idempotent on &lt;see cref="TrackPurchaseInput.TransactionId"/&gt;,
+        /// so calling it unconditionally on every restore — without
+        /// tracking what you already reported — is the intended usage.
+        /// &lt;/para&gt;
+        /// &lt;/summary&gt;
+        public Task&lt;TrackPurchaseResult&gt; TrackPurchaseAsync(
+            TrackPurchaseInput input,
+            string? @as = null,
+            CancellationToken ct = default
+        ) =&gt; Purchases.TrackAsync(input, @as, ct);
+
+        /// &lt;summary&gt;
+        /// The active player this SDK is currently representing. Null
+        /// until the first player-scoped call resolves the identity
+        /// (or &lt;see cref="EnsureIdentityAsync"/&gt; is awaited
+        /// explicitly).
+        /// &lt;/summary&gt;
+        public string? ActiveExternalPlayerId =&gt; Client.ActiveExternalPlayerId;
+
+        /// &lt;summary&gt;
+        /// Resolve the active player identity, registering a fresh one
+        /// if no persisted identity exists. Most games don't need to
+        /// call this, since any player-scoped method triggers it
+        /// transparently. Reach for it when you want the id available
+        /// before the first request.
+        /// &lt;/summary&gt;
+        public Task&lt;(string ExternalPlayerId, string Secret)&gt; EnsureIdentityAsync(CancellationToken ct = default)
+            =&gt; Client.EnsureIdentityAsync(ct);
+
+        /// &lt;summary&gt;
+        /// Forget the persisted identity. The next player-scoped call
+        /// lazily registers a new player (or resumes a different id if
+        /// the SecretStore holds one).
+        /// &lt;/summary&gt;
+        public Task LogoutAsync(CancellationToken ct = default) =&gt; Client.LogoutAsync(ct);
+
+        /// &lt;summary&gt;
+        /// Install an explicit identity on this SDK and persist it.
+        /// Use when your own auth gave you back a Kraty
+        /// &lt;c&gt;externalPlayerId&lt;/c&gt; + &lt;c&gt;secret&lt;/c&gt;, e.g. on a new
+        /// device after a server-side device-link flow.
+        /// &lt;/summary&gt;
+        public Task SignInAsync(string externalPlayerId, string secret, CancellationToken ct = default)
+            =&gt; Client.SignInAsync(externalPlayerId, secret, ct);
+
+        /// &lt;summary&gt;
+        /// Finalization catch-up (docs/05b). &lt;see cref="OnFinalized"/&gt; fires
+        /// when a board the player is in ends: live over SSE while subscribed,
+        /// OR via &lt;see cref="CheckFinalizationsAsync"/&gt; for boards that
+        /// finalized while they were away (call it on app foreground /
+        /// reconnect). Both paths deliver exactly once.
+        /// &lt;see cref="DismissAsync"/&gt; / &lt;see cref="ClearReportedAsync"/&gt;
+        /// acknowledge handled results so they leave storage.
+        /// &lt;/summary&gt;
+        public Action OnFinalized(Action&lt;FinalizationResult&gt; cb) =&gt; Client.OnFinalized(cb);
+
+        /// &lt;summary&gt;Poll tracked boards; report + return any that finalized while away.&lt;/summary&gt;
+        public Task&lt;List&lt;FinalizationResult&gt;&gt; CheckFinalizationsAsync() =&gt; Client.CheckFinalizationsAsync();
+
+        /// &lt;summary&gt;Acknowledge a handled finalization, dropping it from the registry.&lt;/summary&gt;
+        public Task DismissAsync(MembershipRef @ref) =&gt; Client.DismissAsync(@ref);
+
+        /// &lt;summary&gt;Bulk-drop every already-reported membership. Returns the count.&lt;/summary&gt;
+        public Task&lt;int&gt; ClearReportedAsync() =&gt; Client.ClearReportedAsync();
+
+        /// &lt;summary&gt;
+        /// Server clock. Fetch the backend's time so game timers can't be cheated
+        /// by changing the device clock. &lt;see cref="GetServerTimeAsync"/&gt; is a
+        /// one-shot fetch; &lt;see cref="SyncTimeAsync"/&gt; + &lt;see cref="ServerNow"/&gt;
+        /// give a tamper-proof local clock anchored to the server via a monotonic
+        /// reference (call &lt;see cref="SyncTimeAsync"/&gt; at startup + on resume).
+        /// Compare &lt;see cref="ServerNow"/&gt; / &lt;see cref="ServerTime.EpochMs"/&gt;
+        /// against an event's &lt;c&gt;endsAt&lt;/c&gt;.
+        /// &lt;/summary&gt;
+        public Task&lt;ServerTime&gt; GetServerTimeAsync(string? timezone = null, CancellationToken ct = default)
+            =&gt; Client.GetServerTimeAsync(timezone, ct);
+
+        /// &lt;summary&gt;Fetch server time once and anchor it to a monotonic clock. See &lt;see cref="ServerNow"/&gt;.&lt;/summary&gt;
+        public Task SyncTimeAsync(CancellationToken ct = default) =&gt; Client.SyncTimeAsync(ct);
+
+        /// &lt;summary&gt;True once &lt;see cref="SyncTimeAsync"/&gt; has succeeded at least once.&lt;/summary&gt;
+        public bool IsTimeSynced =&gt; Client.IsTimeSynced;
+
+        /// &lt;summary&gt;Tamper-proof current server time as Unix epoch ms (UTC). Throws if not synced.&lt;/summary&gt;
+        public long ServerNowMs() =&gt; Client.ServerNowMs();
+
+        /// &lt;summary&gt;Tamper-proof current server time as a UTC &lt;see cref="DateTime"/&gt;. Throws if not synced.&lt;/summary&gt;
+        public DateTime ServerNow() =&gt; Client.ServerNow();
+
+        /// &lt;summary&gt;
+        /// Bootstrap a player-authenticated &lt;see cref="Kraty"/&gt; in one
+        /// call. Reads the stored secret from
+        /// &lt;paramref name="secretStore"/&gt;, registers if absent, retries
+        /// with &lt;c&gt;force: true&lt;/c&gt; on a &lt;c&gt;player_already_registered&lt;/c&gt;
+        /// 409 (dev/test envs only, since production keys reject
+        /// &lt;c&gt;force&lt;/c&gt; and the 409 surfaces to the caller), persists
+        /// the secret, and returns a &lt;see cref="Kraty"/&gt; wired with the
+        /// secret on every subsequent request.
+        ///
+        /// &lt;para&gt;
+        /// Most apps don't need this; &lt;c&gt;new Kraty(new KratyClientOptions { ApiKey = ... })&lt;/c&gt;
+        /// is enough and lazily registers on the first call. Use this
+        /// when you want the register I/O to happen at a specific
+        /// moment (e.g. behind a loading screen).
+        /// &lt;/para&gt;
+        /// &lt;/summary&gt;
+        public static async Task&lt;Kraty&gt; ConnectAsPlayerAsync(
+            KratyClientOptions options,
+            string externalPlayerId,
+            ISecretStore secretStore,
+            bool autoRotateOnConflict = true,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (options == null) throw new ArgumentNullException(nameof(options));
+            if (string.IsNullOrEmpty(externalPlayerId)) throw new ArgumentException("externalPlayerId is required", nameof(externalPlayerId));
+            if (secretStore == null) throw new ArgumentNullException(nameof(secretStore));
+
+            var stored = await secretStore.ReadAsync(externalPlayerId, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(stored))
+            {
+                await secretStore.WriteActiveExternalPlayerIdAsync(externalPlayerId, cancellationToken).ConfigureAwait(false);
+                return new Kraty(options
+                    .WithPlayerSecret(stored)
+                    .WithActiveExternalPlayerId(externalPlayerId));
+            }
+
+            // First-launch / wiped-data path: register via a pre-register
+            // client (no PlayerSecret) so we don't keep a long-lived
+            // client around without a secret.
+            var preRegister = new Kraty(options.WithPlayerSecret(null));
+            try
+            {
+                PlayerRegistration reg;
+                try
+                {
+                    reg = await preRegister.Players.RegisterAsync(externalPlayerId, force: false, ct: cancellationToken).ConfigureAwait(false);
+                }
+                catch (KratyApiError err) when (autoRotateOnConflict &amp;&amp; err.IsPlayerAlreadyRegistered)
+                {
+                    reg = await preRegister.Players.RegisterAsync(externalPlayerId, force: true, ct: cancellationToken).ConfigureAwait(false);
+                }
+                await secretStore.WriteAsync(externalPlayerId, reg.Secret, cancellationToken).ConfigureAwait(false);
+                await secretStore.WriteActiveExternalPlayerIdAsync(externalPlayerId, cancellationToken).ConfigureAwait(false);
+                return new Kraty(options
+                    .WithPlayerSecret(reg.Secret)
+                    .WithActiveExternalPlayerId(externalPlayerId));
+            }
+            finally
+            {
+                preRegister.Dispose();
+            }
+        }
+
+        /// &lt;summary&gt;
+        /// Recover the active player identity from a
+        /// &lt;see cref="ISecretStore"/&gt;. Returns null when the device has
+        /// never connected or after a logout. Use on app boot to
+        /// decide between "auto-resume" and "show onboarding".
+        /// &lt;/summary&gt;
+        public static async Task&lt;StoredIdentity?&gt; ReadStoredIdentityAsync(
+            ISecretStore secretStore,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (secretStore == null) throw new ArgumentNullException(nameof(secretStore));
+            var externalPlayerId = await secretStore.ReadActiveExternalPlayerIdAsync(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrEmpty(externalPlayerId)) return null;
+            var secret = await secretStore.ReadAsync(externalPlayerId, cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrEmpty(secret)) return null;
+            return new StoredIdentity(externalPlayerId, secret);
+        }
+
+        /// &lt;summary&gt;
+        /// Writes &lt;paramref name="identity"/&gt; into
+        /// &lt;paramref name="secretStore"/&gt; so a subsequent
+        /// &lt;see cref="ReadStoredIdentityAsync"/&gt; returns it.
+        /// &lt;/summary&gt;
+        public static async Task RestoreStoredIdentityAsync(
+            ISecretStore secretStore,
+            StoredIdentity identity,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (secretStore == null) throw new ArgumentNullException(nameof(secretStore));
+            if (identity == null) throw new ArgumentNullException(nameof(identity));
+            await secretStore.WriteAsync(identity.ExternalPlayerId, identity.Secret, cancellationToken).ConfigureAwait(false);
+            await secretStore.WriteActiveExternalPlayerIdAsync(identity.ExternalPlayerId, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// &lt;summary&gt;
+        /// Forgets the device's active-player marker WITHOUT erasing
+        /// per-player secrets. Use this on "log out" or "switch user".
+        /// &lt;/summary&gt;
+        public static Task ClearStoredIdentityAsync(
+            ISecretStore secretStore,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (secretStore == null) throw new ArgumentNullException(nameof(secretStore));
+            return secretStore.ClearActiveExternalPlayerIdAsync(cancellationToken);
+        }
+    }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

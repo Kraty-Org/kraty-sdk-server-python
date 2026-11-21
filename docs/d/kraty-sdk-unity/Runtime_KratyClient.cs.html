@@ -1,0 +1,1073 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-unity/Runtime/KratyClient.cs</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-unity/Runtime/KratyClient.cs</h1><p class=muted>kraty-sdk-unity/Runtime/KratyClient.cs</p><pre><code class="language-csharp">using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using Newtonsoft.Json.Serialization;
+
+namespace Kraty
+{
+    /// &lt;summary&gt;
+    /// Options the consumer passes to &lt;c&gt;new KratyClient(...)&lt;/c&gt;.
+    /// &lt;/summary&gt;
+    public sealed class KratyClientOptions
+    {
+        /// &lt;summary&gt;API key in the &lt;c&gt;{prefix}.{secret}&lt;/c&gt; form returned by the portal.&lt;/summary&gt;
+        public string ApiKey { get; set; } = string.Empty;
+
+        /// &lt;summary&gt;
+        /// Per-player secret. When set, the client attaches
+        /// &lt;c&gt;X-Player-Secret: &amp;lt;value&amp;gt;&lt;/c&gt; to every request. Required
+        /// by all player-scoped routes (events.start, events.progress,
+        /// grants.*, inventory.*, wallet.*); without it those return
+        /// 401 &lt;c&gt;player_secret_invalid&lt;/c&gt;.
+        ///
+        /// &lt;para&gt;
+        /// Leave unset to let the SDK auto-register on the first
+        /// player-scoped call. See &lt;see cref="KratyClient.EnsureIdentityAsync"/&gt;.
+        /// &lt;/para&gt;
+        /// &lt;/summary&gt;
+        public string? PlayerSecret { get; set; }
+
+        /// &lt;summary&gt;
+        /// The &lt;c&gt;externalPlayerId&lt;/c&gt; this SDK instance is
+        /// authenticated as. When set, player-scoped methods default
+        /// to this id and skip auto-register on first call. Leave
+        /// unset for self-serve signups; the SDK then auto-generates
+        /// a UUID on first use and persists it in
+        /// &lt;see cref="SecretStore"/&gt;.
+        /// &lt;/summary&gt;
+        public string? ActiveExternalPlayerId { get; set; }
+
+        /// &lt;summary&gt;
+        /// Persistence backend for the player secret + active id. When
+        /// omitted, the SDK picks a sensible default:
+        ///
+        /// &lt;list type="bullet"&gt;
+        ///   &lt;item&gt;&lt;description&gt;In a Unity runtime → &lt;c&gt;PlayerPrefsSecretStore&lt;/c&gt;.&lt;/description&gt;&lt;/item&gt;
+        ///   &lt;item&gt;&lt;description&gt;Plain .NET (CLI, tests) → &lt;see cref="InMemorySecretStore"/&gt;. Wire your own (DPAPI, libsecret, file-on-disk) if you need durability.&lt;/description&gt;&lt;/item&gt;
+        /// &lt;/list&gt;
+        ///
+        /// Most game clients never touch this; the default does the
+        /// right thing on every platform the SDK ships on.
+        /// &lt;/summary&gt;
+        public ISecretStore? SecretStore { get; set; }
+
+        /// &lt;summary&gt;
+        /// Persisted registry of the boards the player is in, powering the
+        /// finalization catch-up (see docs/05b + &lt;see cref="FinalizationTracker"/&gt;).
+        /// Defaults per platform: &lt;c&gt;PlayerPrefsMembershipStore&lt;/c&gt; in Unity,
+        /// &lt;see cref="InMemoryMembershipStore"/&gt; elsewhere. Override to share a
+        /// store or point at your own durable backing.
+        /// &lt;/summary&gt;
+        public IMembershipStore? MembershipStore { get; set; }
+
+        /// &lt;summary&gt;
+        /// Platform this client runs on, sent as &lt;c&gt;X-Kraty-Platform&lt;/c&gt; on
+        /// every request so the dashboard can split players by device.
+        /// Leave unset and the SDK reads &lt;c&gt;Application.platform&lt;/c&gt; —
+        /// &lt;c&gt;ios&lt;/c&gt;, &lt;c&gt;android&lt;/c&gt;, &lt;c&gt;web&lt;/c&gt;, &lt;c&gt;windows&lt;/c&gt;,
+        /// &lt;c&gt;macos&lt;/c&gt;, &lt;c&gt;linux&lt;/c&gt;, &lt;c&gt;editor&lt;/c&gt;. Set it to the key of a
+        /// platform you defined in the game's Settings → Platforms (a store
+        /// front, a console build) to report that instead.
+        /// &lt;/summary&gt;
+        public string? Platform { get; set; }
+
+        /// &lt;summary&gt;
+        /// Your game's build version, sent as &lt;c&gt;X-Kraty-App-Version&lt;/c&gt; on
+        /// every request and shown on the player's profile. Leave unset and
+        /// the SDK reads &lt;c&gt;Application.version&lt;/c&gt; (Player Settings →
+        /// Version).
+        /// &lt;/summary&gt;
+        public string? AppVersion { get; set; }
+
+        /// &lt;summary&gt;
+        /// The game's profanity-filter choice for its player's chat. Kraty
+        /// resolves every message's text per viewer; when this is set, every
+        /// &lt;c&gt;kraty.Chat&lt;/c&gt; request and the chat stream send
+        /// &lt;c&gt;X-Kraty-Chat-Filter: on&lt;/c&gt; (&lt;c&gt;true&lt;/c&gt;) or &lt;c&gt;off&lt;/c&gt;
+        /// (&lt;c&gt;false&lt;/c&gt;), which wins over the player's saved preference.
+        /// Leave null (the default) to send nothing: the player's saved
+        /// preference applies, then each conversation kind's default. A kind
+        /// configured as &lt;c&gt;always&lt;/c&gt; filters regardless.
+        /// &lt;/summary&gt;
+        public bool? ChatProfanityFilter { get; set; }
+
+        /// &lt;summary&gt;
+        /// How long the chat outbox keeps retrying a send or edit while the
+        /// server is busy (5xx) or the network is down, measured from when the
+        /// message was queued (time held for a cooldown with
+        /// &lt;see cref="ChatWaitForCooldown"/&gt; doesn't count). After that the
+        /// call fails with &lt;see cref="KratyChatNotSentError"/&gt;. Default 120 s.
+        /// &lt;/summary&gt;
+        public TimeSpan ChatOutboxTimeout { get; set; } = TimeSpan.FromSeconds(120);
+
+        /// &lt;summary&gt;
+        /// When a chat send reaches the head of its conversation's queue while
+        /// the conversation's cooldown is still running
+        /// (&lt;c&gt;Chat.CooldownRemaining&lt;/c&gt; &amp;gt; 0): false (the default) fails it at
+        /// once, locally, with a 429 &lt;c&gt;chat_slow_mode&lt;/c&gt;
+        /// &lt;see cref="KratyApiError"/&gt; and no request; true holds it in the
+        /// outbox until the cooldown ends, then sends it. Each send can
+        /// override this with its &lt;c&gt;waitForCooldown&lt;/c&gt; argument.
+        /// &lt;/summary&gt;
+        public bool ChatWaitForCooldown { get; set; }
+
+        // Chat outbox backoff (no Retry-After): base * 2^(n-1) * [0.5, 1], capped.
+        // Internal so tests can shrink them.
+        internal TimeSpan ChatOutboxBackoffBase { get; set; } = TimeSpan.FromMilliseconds(500);
+        internal TimeSpan ChatOutboxBackoffMax { get; set; } = TimeSpan.FromSeconds(10);
+
+        /// &lt;summary&gt;Override only for testing / staging. Production clients always hit the default.&lt;/summary&gt;
+        public string BaseUrl { get; set; } = "https://api.kraty.io";
+
+        /// &lt;summary&gt;Per-request timeout. Defaults to 10s.&lt;/summary&gt;
+        public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(10);
+
+        /// &lt;summary&gt;
+        /// Retry configuration. Defaults to 4 attempts with exponential
+        /// backoff starting at 100ms for server-side failures, and at 1s
+        /// for connectivity failures (see
+        /// &lt;see cref="RetryConfig.OfflineInitialDelay"/&gt;).
+        /// &lt;/summary&gt;
+        public RetryConfig Retry { get; set; } = new();
+
+        /// &lt;summary&gt;
+        /// Optional HttpMessageHandler. Tests inject mocks; production
+        /// can layer DelegatingHandler for logging / observability.
+        /// &lt;/summary&gt;
+        public HttpMessageHandler? HttpMessageHandler { get; set; }
+
+        /// &lt;summary&gt;
+        /// Idempotency-key generator. Defaults to &lt;see cref="Guid.NewGuid"/&gt;.
+        /// &lt;/summary&gt;
+        public Func&lt;string&gt;? GenerateIdempotencyKey { get; set; }
+
+        /// &lt;summary&gt;Fires after every HTTP attempt. Useful for telemetry.&lt;/summary&gt;
+        public Action&lt;RequestInfo&gt;? OnRequest { get; set; }
+
+        /// &lt;summary&gt;
+        /// Returns a shallow copy of this options object with
+        /// &lt;see cref="PlayerSecret"/&gt; replaced.
+        /// &lt;/summary&gt;
+        public KratyClientOptions WithPlayerSecret(string? playerSecret)
+        {
+            return new KratyClientOptions
+            {
+                ApiKey = ApiKey,
+                PlayerSecret = playerSecret,
+                ActiveExternalPlayerId = ActiveExternalPlayerId,
+                SecretStore = SecretStore,
+                MembershipStore = MembershipStore,
+                ChatProfanityFilter = ChatProfanityFilter,
+                ChatOutboxTimeout = ChatOutboxTimeout,
+                ChatWaitForCooldown = ChatWaitForCooldown,
+                ChatOutboxBackoffBase = ChatOutboxBackoffBase,
+                ChatOutboxBackoffMax = ChatOutboxBackoffMax,
+                BaseUrl = BaseUrl,
+                Timeout = Timeout,
+                Retry = Retry,
+                HttpMessageHandler = HttpMessageHandler,
+                GenerateIdempotencyKey = GenerateIdempotencyKey,
+                OnRequest = OnRequest,
+            };
+        }
+
+        /// &lt;summary&gt;
+        /// Returns a shallow copy with &lt;see cref="ActiveExternalPlayerId"/&gt;
+        /// replaced.
+        /// &lt;/summary&gt;
+        public KratyClientOptions WithActiveExternalPlayerId(string? id)
+        {
+            return new KratyClientOptions
+            {
+                ApiKey = ApiKey,
+                PlayerSecret = PlayerSecret,
+                ActiveExternalPlayerId = id,
+                SecretStore = SecretStore,
+                MembershipStore = MembershipStore,
+                ChatProfanityFilter = ChatProfanityFilter,
+                ChatOutboxTimeout = ChatOutboxTimeout,
+                ChatWaitForCooldown = ChatWaitForCooldown,
+                ChatOutboxBackoffBase = ChatOutboxBackoffBase,
+                ChatOutboxBackoffMax = ChatOutboxBackoffMax,
+                BaseUrl = BaseUrl,
+                Timeout = Timeout,
+                Retry = Retry,
+                HttpMessageHandler = HttpMessageHandler,
+                GenerateIdempotencyKey = GenerateIdempotencyKey,
+                OnRequest = OnRequest,
+            };
+        }
+    }
+
+    public sealed class RetryConfig
+    {
+        /// &lt;summary&gt;TOTAL number of HTTP calls (1 = no retry).&lt;/summary&gt;
+        public int Attempts { get; set; } = 4;
+        public TimeSpan InitialDelay { get; set; } = TimeSpan.FromMilliseconds(100);
+        /// &lt;summary&gt;
+        /// Backoff floor for CONNECTIVITY-class failures (DNS
+        /// resolution, host/network unreachable) as opposed to a server
+        /// that answered. Deliberately an order of magnitude above
+        /// &lt;see cref="InitialDelay"/&gt;: the sub-second ladder is tuned
+        /// for a 503 from a healthy backend, but a device coming out of
+        /// doze, off a captive portal, or switching Wi-Fi-to-cellular
+        /// needs SECONDS before its resolver works again. Retrying
+        /// faster than that just burns the budget re-hitting the same
+        /// failed lookup and surfaces a spurious offline error.
+        /// &lt;/summary&gt;
+        public TimeSpan OfflineInitialDelay { get; set; } = TimeSpan.FromSeconds(1);
+        public TimeSpan MaxDelay { get; set; } = TimeSpan.FromSeconds(5);
+        /// &lt;summary&gt;Jitter factor (0-1). Default 0.2.&lt;/summary&gt;
+        public double Jitter { get; set; } = 0.2;
+    }
+
+    public sealed class RequestInfo
+    {
+        public string Method { get; set; } = string.Empty;
+        public string Url { get; set; } = string.Empty;
+        public int Attempt { get; set; }
+        public string? IdempotencyKey { get; set; }
+        public TimeSpan Duration { get; set; }
+        public int? Status { get; set; }
+        public bool Ok { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// HTTP client for the Kraty &lt;c&gt;/sdk/v1&lt;/c&gt; surface. Bearer auth,
+    /// optional per-player &lt;c&gt;X-Player-Secret&lt;/c&gt; header,
+    /// auto-idempotency-key stamping on POST/PUT/PATCH (re-used across
+    /// retries so the server's idempotency check dedupes a replay),
+    /// exponential backoff + jitter on 408/425/429/5xx + network
+    /// (connectivity failures get a slower ladder than server errors)
+    /// failures, special-cases the 202 + lobby_forming response shape.
+    ///
+    /// Resource clients (&lt;see cref="EventsClient"/&gt;,
+    /// &lt;see cref="LeaderboardsClient"/&gt;, ...) compose over an instance;
+    /// the convenience facade &lt;see cref="Kraty"/&gt; wires them all up.
+    /// &lt;/summary&gt;
+    public sealed class KratyClient : IDisposable
+    {
+        private const string SdkName = "app.kraty.sdk";
+        private const string SdkVersion = "0.30.0";
+        private const string SdkUserAgent = SdkName + "/" + SdkVersion;
+
+        private static readonly JsonSerializerSettings JsonOptions = new()
+        {
+            ContractResolver = new CamelCasePropertyNamesContractResolver(),
+            NullValueHandling = NullValueHandling.Ignore,
+        };
+
+        private static readonly HashSet&lt;HttpMethod&gt; IdempotentMethods = new()
+        {
+            HttpMethod.Post,
+            HttpMethod.Put,
+            new HttpMethod("PATCH"),
+        };
+
+        private static readonly HashSet&lt;int&gt; RetryableStatuses = new() { 408, 425, 429, 500, 502, 503, 504 };
+
+        private readonly HttpClient _http;
+        private readonly bool _ownsHttp;
+        private readonly RetryConfig _retry;
+        private readonly Func&lt;string&gt; _generateIdempotencyKey;
+        private readonly Action&lt;RequestInfo&gt;? _onRequest;
+        private readonly Random _jitterRng = new();
+        private readonly string _baseUrl;
+        private readonly string _authHeader;
+        // Device telemetry headers (see KratyClientOptions.Platform / AppVersion).
+        private readonly string? _platform;
+        private readonly string? _appVersion;
+        // `on` / `off` for X-Kraty-Chat-Filter (see KratyClientOptions.ChatProfanityFilter); null = not sent.
+        private readonly string? _chatFilter;
+        // Identity is mutable on purpose: the lazy EnsureIdentityAsync()
+        // call may register or restore a player after construction and
+        // mutate these in place so subsequent calls skip the round-trip.
+        private string? _playerSecret;
+        private string? _activeExternalPlayerId;
+        private readonly ISecretStore _secretStore;
+        private readonly FinalizationTracker _finalization;
+        private readonly object _identityGate = new();
+        private Task&lt;(string ExternalPlayerId, string Secret)&gt;? _identityInit;
+        // Monotonic clock backing the tamper-proof server-time anchor (see the
+        // "Server clock" region). Stopwatch is driven by the high-resolution
+        // performance counter, NOT the system wall-clock, so its elapsed reading
+        // can't be moved by a player changing their device clock. Started once.
+        private readonly System.Diagnostics.Stopwatch _monoClock = System.Diagnostics.Stopwatch.StartNew();
+        // Server-clock anchor (see SyncTimeAsync): the server epoch captured at
+        // sync + the MONOTONIC reading at that instant, so ServerNow() advances
+        // immune to the device wall-clock being changed. Null until synced.
+        private (long ServerMs, long MonoMs)? _timeAnchor;
+
+        public KratyClient(KratyClientOptions opts)
+        {
+            if (opts == null) throw new ArgumentNullException(nameof(opts));
+            if (string.IsNullOrEmpty(opts.ApiKey))
+                throw new ArgumentException("KratyClient: ApiKey is required", nameof(opts));
+
+            _baseUrl = opts.BaseUrl.TrimEnd('/');
+            _authHeader = $"Bearer {opts.ApiKey}";
+            _platform = NormalizePlatform(opts.Platform) ?? DetectPlatform();
+            _appVersion = string.IsNullOrWhiteSpace(opts.AppVersion) ? DetectAppVersion() : opts.AppVersion!.Trim();
+            _chatFilter = opts.ChatProfanityFilter switch { true =&gt; "on", false =&gt; "off", null =&gt; null };
+            ChatOutboxTimeout = opts.ChatOutboxTimeout;
+            ChatWaitForCooldown = opts.ChatWaitForCooldown;
+            ChatOutboxBackoffBase = opts.ChatOutboxBackoffBase;
+            ChatOutboxBackoffMax = opts.ChatOutboxBackoffMax;
+            _playerSecret = string.IsNullOrEmpty(opts.PlayerSecret) ? null : opts.PlayerSecret;
+            _activeExternalPlayerId = string.IsNullOrEmpty(opts.ActiveExternalPlayerId)
+                ? null
+                : opts.ActiveExternalPlayerId;
+            _secretStore = opts.SecretStore ?? DefaultSecretStore();
+
+            _http = opts.HttpMessageHandler != null
+                ? new HttpClient(opts.HttpMessageHandler, disposeHandler: false)
+                : new HttpClient();
+            _ownsHttp = true;
+            _http.BaseAddress = new Uri(_baseUrl, UriKind.Absolute);
+            _http.Timeout = opts.Timeout;
+
+            _retry = opts.Retry;
+            _generateIdempotencyKey = opts.GenerateIdempotencyKey ?? (() =&gt; Guid.NewGuid().ToString());
+            _onRequest = opts.OnRequest;
+
+            _finalization = new FinalizationTracker(
+                opts.MembershipStore ?? DefaultMembershipStore(),
+                // Never force-register during catch-up: only the current active player.
+                getActivePlayerId: () =&gt; Task.FromResult(_activeExternalPlayerId),
+                readEventLeaderboard: ReadEventLeaderboardStatusAsync);
+        }
+
+        // Same slug rule the backend applies; anything else is dropped, not sent.
+        private static readonly System.Text.RegularExpressions.Regex PlatformKey =
+            new("^[a-z0-9][a-z0-9_-]{0,31}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        private static string? NormalizePlatform(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var key = raw!.Trim().ToLowerInvariant();
+            return PlatformKey.IsMatch(key) ? key : null;
+        }
+
+        // Inside Unity, Application.platform names the device the build runs
+        // on; the editor reports `editor` so QA sessions don't pollute the
+        // per-platform numbers. Plain .NET (tests, tools) reports nothing.
+        private static string? DetectPlatform()
+        {
+#if UNITY_5_3_OR_NEWER
+            switch (UnityEngine.Application.platform)
+            {
+                case UnityEngine.RuntimePlatform.IPhonePlayer: return "ios";
+                case UnityEngine.RuntimePlatform.Android: return "android";
+                case UnityEngine.RuntimePlatform.WebGLPlayer: return "web";
+                case UnityEngine.RuntimePlatform.WindowsPlayer: return "windows";
+                case UnityEngine.RuntimePlatform.OSXPlayer: return "macos";
+                case UnityEngine.RuntimePlatform.LinuxPlayer: return "linux";
+                case UnityEngine.RuntimePlatform.WindowsEditor:
+                case UnityEngine.RuntimePlatform.OSXEditor:
+                case UnityEngine.RuntimePlatform.LinuxEditor: return "editor";
+                default: return null;
+            }
+#else
+            return null;
+#endif
+        }
+
+        private static string? DetectAppVersion()
+        {
+#if UNITY_5_3_OR_NEWER
+            var v = UnityEngine.Application.version;
+            return string.IsNullOrWhiteSpace(v) ? null : v.Trim();
+#else
+            return null;
+#endif
+        }
+
+        // Probe an event board's finalized status + reason + the caller's self
+        // entry for the finalization catch-up. Returns null (treated as
+        // still-active) when there's no active player or the read fails.
+        private async Task&lt;EventLeaderboardStatus?&gt; ReadEventLeaderboardStatusAsync(string leaderboardId)
+        {
+            var ext = _activeExternalPlayerId;
+            if (string.IsNullOrEmpty(ext)) return null;
+            try
+            {
+                // Pull the top rows (not just self) so a finalization can be
+                // rendered straight from the result — each row already carries
+                // server-resolved avatar + isSelf, so the app doesn't re-fetch
+                // or match ids.
+                var qs = $"includeSelf=true&amp;externalId={Uri.EscapeDataString(ext!)}&amp;limit=50";
+                var env = await RequestAsync&lt;DataEnvelope&lt;EventLeaderboard&gt;&gt;(
+                    HttpMethod.Get,
+                    $"/sdk/v1/event-leaderboards/{Uri.EscapeDataString(leaderboardId)}?{qs}"
+                ).ConfigureAwait(false);
+                var lb = env.Data;
+                if (lb == null) return null;
+                var self = lb.Self != null ? new SelfEntry(lb.Self.Rank, lb.Self.Score) : null;
+                var standings = lb.Entries.Select(e =&gt; new FinalStanding
+                {
+                    ParticipantId = e.ParticipantId,
+                    Rank = e.Rank,
+                    Score = e.Score,
+                    Name = e.Name ?? string.Empty,
+                    Kind = e.Kind == StandingKind.Bot ? StandingKind.Bot : StandingKind.Player,
+                    Avatar = e.Avatar,
+                    IsSelf = e.IsSelf,
+                }).ToList();
+                return new EventLeaderboardStatus(lb.Finalized, lb.FinalizedReason, self, standings);
+            }
+            catch
+            {
+                return null; // unreadable → treat as still-active
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_ownsHttp) _http.Dispose();
+        }
+
+        // ── Accessors for the SSE leaderboard stream ─────────────────
+        // These let LeaderboardStream re-use the configured auth/base
+        // url without us having to widen the public API of the client.
+
+        internal string BaseUrlForStreaming =&gt; _baseUrl;
+        internal string AuthHeaderForStreaming =&gt; _authHeader;
+        internal string? PlayerSecretForStreaming =&gt; _playerSecret;
+        internal HttpClient HttpForStreaming =&gt; _http;
+        internal JsonSerializerSettings JsonSerializerSettings =&gt; JsonOptions;
+        internal ISecretStore SecretStore =&gt; _secretStore;
+        /// &lt;summary&gt;&lt;c&gt;on&lt;/c&gt; / &lt;c&gt;off&lt;/c&gt; when the game set a chat filter choice, else null.&lt;/summary&gt;
+        internal string? ChatFilterValue =&gt; _chatFilter;
+        // Chat outbox settings (see KratyClientOptions).
+        internal TimeSpan ChatOutboxTimeout { get; }
+        internal bool ChatWaitForCooldown { get; }
+        internal TimeSpan ChatOutboxBackoffBase { get; }
+        internal TimeSpan ChatOutboxBackoffMax { get; }
+
+        /// &lt;summary&gt;
+        /// The active player this client is authenticated as. Resource
+        /// methods fall back to this id when the caller omits the
+        /// &lt;c&gt;@as&lt;/c&gt; argument. Returns null until
+        /// &lt;see cref="EnsureIdentityAsync"/&gt; has run at least once.
+        /// &lt;/summary&gt;
+        public string? ActiveExternalPlayerId =&gt; _activeExternalPlayerId;
+
+        /// &lt;summary&gt;
+        /// The current player secret, exposed for advanced cases (e.g.
+        /// re-creating a client with the same identity). Null until
+        /// identity is resolved.
+        /// &lt;/summary&gt;
+        public string? PlayerSecret =&gt; _playerSecret;
+
+        /// &lt;summary&gt;
+        /// Resolve the active player, registering a fresh one if none
+        /// exists. Called transparently by every player-scoped resource
+        /// method. Game code rarely needs to invoke this directly.
+        ///
+        /// &lt;para&gt;
+        /// Resolution order:
+        /// &lt;/para&gt;
+        /// &lt;list type="number"&gt;
+        ///   &lt;item&gt;&lt;description&gt;Constructor &lt;c&gt;ActiveExternalPlayerId&lt;/c&gt; + &lt;c&gt;PlayerSecret&lt;/c&gt; if both supplied (explicit, no I/O).&lt;/description&gt;&lt;/item&gt;
+        ///   &lt;item&gt;&lt;description&gt;Persisted active id in the SecretStore + matching persisted secret (restore).&lt;/description&gt;&lt;/item&gt;
+        ///   &lt;item&gt;&lt;description&gt;Fresh signup: generate a &lt;c&gt;kp_&amp;lt;guid&amp;gt;&lt;/c&gt; id, POST &lt;c&gt;/sdk/v1/players/:id/register&lt;/c&gt;, persist + install.&lt;/description&gt;&lt;/item&gt;
+        /// &lt;/list&gt;
+        ///
+        /// &lt;para&gt;
+        /// Concurrent first-touch calls share one inflight task so we
+        /// don't double-register.
+        /// &lt;/para&gt;
+        /// &lt;/summary&gt;
+        public Task&lt;(string ExternalPlayerId, string Secret)&gt; EnsureIdentityAsync(CancellationToken cancellationToken = default)
+        {
+            if (_activeExternalPlayerId != null &amp;&amp; _playerSecret != null)
+            {
+                return Task.FromResult((_activeExternalPlayerId, _playerSecret));
+            }
+            lock (_identityGate)
+            {
+                if (_activeExternalPlayerId != null &amp;&amp; _playerSecret != null)
+                {
+                    return Task.FromResult((_activeExternalPlayerId, _playerSecret));
+                }
+                // An inflight resolve dedupes concurrent first-touch.
+                // A completed cached task is stale (e.g. after LogoutAsync
+                // wiped state), so re-run the resolver.
+                if (_identityInit != null &amp;&amp; !_identityInit.IsCompleted) return _identityInit;
+                _identityInit = ResolveIdentityAsync(cancellationToken);
+                return _identityInit;
+            }
+        }
+
+        private async Task&lt;(string ExternalPlayerId, string Secret)&gt; ResolveIdentityAsync(CancellationToken cancellationToken)
+        {
+            var explicitActive = _activeExternalPlayerId;
+            var storedActive = await _secretStore.ReadActiveExternalPlayerIdAsync(cancellationToken).ConfigureAwait(false);
+            var candidate = explicitActive ?? storedActive;
+            if (!string.IsNullOrEmpty(candidate))
+            {
+                var secret = await _secretStore.ReadAsync(candidate!, cancellationToken).ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(secret))
+                {
+                    _activeExternalPlayerId = candidate;
+                    _playerSecret = secret;
+                    await _secretStore.WriteActiveExternalPlayerIdAsync(candidate!, cancellationToken).ConfigureAwait(false);
+                    return (candidate!, secret!);
+                }
+            }
+
+            var newId = !string.IsNullOrEmpty(explicitActive)
+                ? explicitActive!
+                : GenerateExternalPlayerId();
+            var env = await RequestAsync&lt;DataEnvelope&lt;PlayerRegistration&gt;&gt;(
+                HttpMethod.Post,
+                $"/sdk/v1/players/{Uri.EscapeDataString(newId)}/register",
+                body: new Dictionary&lt;string, object?&gt;(),
+                cancellationToken: cancellationToken
+            ).ConfigureAwait(false);
+            var freshSecret = env.Data?.Secret ?? string.Empty;
+            await _secretStore.WriteAsync(newId, freshSecret, cancellationToken).ConfigureAwait(false);
+            await _secretStore.WriteActiveExternalPlayerIdAsync(newId, cancellationToken).ConfigureAwait(false);
+            _activeExternalPlayerId = newId;
+            _playerSecret = freshSecret;
+            return (newId, freshSecret);
+        }
+
+        /// &lt;summary&gt;
+        /// Forget the persisted identity (secret + active id). The next
+        /// player-scoped call triggers a fresh
+        /// &lt;see cref="EnsureIdentityAsync"/&gt; and either resumes from a
+        /// different stored id or registers a new player.
+        /// &lt;/summary&gt;
+        public async Task LogoutAsync(CancellationToken cancellationToken = default)
+        {
+            var id = _activeExternalPlayerId;
+            if (!string.IsNullOrEmpty(id))
+            {
+                try { await _secretStore.RemoveAsync(id!, cancellationToken).ConfigureAwait(false); }
+                catch { /* best-effort */ }
+            }
+            try { await _secretStore.ClearActiveExternalPlayerIdAsync(cancellationToken).ConfigureAwait(false); }
+            catch { /* best-effort */ }
+            _activeExternalPlayerId = null;
+            _playerSecret = null;
+        }
+
+        /// &lt;summary&gt;
+        /// Install an explicit identity on this client (and persist it
+        /// via the SecretStore so subsequent launches resume to it).
+        /// Use when a player signs in via your own auth on a new device
+        /// and you've fetched their secret out of your own backend.
+        /// &lt;/summary&gt;
+        public async Task SignInAsync(string externalPlayerId, string secret, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrEmpty(externalPlayerId)) throw new ArgumentException("externalPlayerId is required", nameof(externalPlayerId));
+            if (string.IsNullOrEmpty(secret)) throw new ArgumentException("secret is required", nameof(secret));
+            await _secretStore.WriteAsync(externalPlayerId, secret, cancellationToken).ConfigureAwait(false);
+            await _secretStore.WriteActiveExternalPlayerIdAsync(externalPlayerId, cancellationToken).ConfigureAwait(false);
+            _activeExternalPlayerId = externalPlayerId;
+            _playerSecret = secret;
+        }
+
+        /// &lt;summary&gt;
+        /// Resolves the player id for a resource call: explicit
+        /// &lt;paramref name="as"/&gt; wins; falls back to a lazy
+        /// &lt;see cref="EnsureIdentityAsync"/&gt;. Internal helper for the
+        /// resource clients.
+        /// &lt;/summary&gt;
+        internal async Task&lt;string&gt; ResolvePlayerIdAsync(string? @as, CancellationToken cancellationToken)
+        {
+            if (!string.IsNullOrEmpty(@as)) return @as!;
+            var identity = await EnsureIdentityAsync(cancellationToken).ConfigureAwait(false);
+            return identity.ExternalPlayerId;
+        }
+
+        /// &lt;summary&gt;
+        /// Low-level: fire a JSON request. Resource clients call this.
+        /// &lt;/summary&gt;
+        public Task&lt;T&gt; RequestAsync&lt;T&gt;(
+            HttpMethod method,
+            string path,
+            object? body = null,
+            CancellationToken cancellationToken = default
+        ) where T : class
+            =&gt; RequestWithHeadersAsync&lt;T&gt;(method, path, body, null, cancellationToken);
+
+        /// &lt;summary&gt;
+        /// &lt;see cref="RequestAsync{T}"/&gt; plus extra request headers (e.g. the
+        /// chat filter choice). &lt;paramref name="retryOn429"/&gt; false surfaces a
+        /// 429 at once instead of backing off and retrying (chat sends and
+        /// edits: a retried refusal is another spam strike).
+        /// &lt;paramref name="maxAttempts"/&gt; overrides
+        /// &lt;see cref="RetryConfig.Attempts"/&gt; (the chat outbox passes 1 and
+        /// runs its own retry loop, so the two never compound).
+        /// &lt;/summary&gt;
+        internal async Task&lt;T&gt; RequestWithHeadersAsync&lt;T&gt;(
+            HttpMethod method,
+            string path,
+            object? body,
+            IReadOnlyDictionary&lt;string, string&gt;? headers,
+            CancellationToken cancellationToken,
+            bool retryOn429 = true,
+            int? maxAttempts = null
+        ) where T : class
+        {
+            var url = path.StartsWith("/", StringComparison.Ordinal) ? path : "/" + path;
+            var idempotencyKey = ResolveIdempotencyKey(method, body);
+            var requestBody = AttachIdempotencyKey(body, idempotencyKey);
+            var attempts = Math.Max(1, maxAttempts ?? _retry.Attempts);
+
+            Exception? lastErr = null;
+            for (int attempt = 1; attempt &lt;= attempts; attempt++)
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                try
+                {
+                    using var res = await FireOnceAsync(method, url, requestBody, headers, cancellationToken).ConfigureAwait(false);
+                    sw.Stop();
+
+                    _onRequest?.Invoke(new RequestInfo
+                    {
+                        Method = method.Method,
+                        Url = url,
+                        Attempt = attempt,
+                        IdempotencyKey = idempotencyKey,
+                        Duration = sw.Elapsed,
+                        Status = (int)res.StatusCode,
+                        Ok = res.IsSuccessStatusCode,
+                    });
+
+                    if (res.IsSuccessStatusCode)
+                    {
+                        var text = await res.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        var maybeErr = TryParseErrorEnvelope(text);
+                        if (maybeErr != null)
+                            throw new KratyApiError((int)res.StatusCode, maybeErr.Code, maybeErr.Message, maybeErr.Details);
+
+                        if (string.IsNullOrEmpty(text)) return default!;
+                        return JsonConvert.DeserializeObject&lt;T&gt;(text, JsonOptions)!;
+                    }
+
+                    var apiErr = await AsApiErrorAsync(res).ConfigureAwait(false);
+                    var retryable = RetryableStatuses.Contains((int)res.StatusCode)
+                        &amp;&amp; !((int)res.StatusCode == 429 &amp;&amp; !retryOn429);
+                    if (retryable &amp;&amp; attempt &lt; attempts)
+                    {
+                        await SleepBackoffAsync(attempt, res, cancellationToken).ConfigureAwait(false);
+                        lastErr = apiErr;
+                        continue;
+                    }
+                    throw apiErr;
+                }
+                catch (KratyApiError)
+                {
+                    throw;
+                }
+                catch (Exception ex) when (!(ex is OperationCanceledException oce &amp;&amp; oce.CancellationToken == cancellationToken))
+                {
+                    sw.Stop();
+                    _onRequest?.Invoke(new RequestInfo
+                    {
+                        Method = method.Method,
+                        Url = url,
+                        Attempt = attempt,
+                        IdempotencyKey = idempotencyKey,
+                        Duration = sw.Elapsed,
+                        Ok = false,
+                    });
+                    var wrapped = new KratyNetworkError(ex.Message, ex);
+                    if (attempt &lt; attempts)
+                    {
+                        // A connectivity-class failure never reached the
+                        // backend, so it gets the slower ladder (see
+                        // RetryConfig.OfflineInitialDelay).
+                        var baseDelay = IsConnectivityFailure(ex)
+                            ? _retry.OfflineInitialDelay
+                            : _retry.InitialDelay;
+                        await SleepBackoffAsync(attempt, null, cancellationToken, baseDelay).ConfigureAwait(false);
+                        lastErr = wrapped;
+                        continue;
+                    }
+                    throw wrapped;
+                }
+            }
+            throw lastErr ?? new KratyNetworkError("exhausted retries");
+        }
+
+        private async Task&lt;HttpResponseMessage&gt; FireOnceAsync(
+            HttpMethod method,
+            string url,
+            object? body,
+            IReadOnlyDictionary&lt;string, string&gt;? headers,
+            CancellationToken cancellationToken
+        )
+        {
+            using var req = new HttpRequestMessage(method, url);
+            req.Headers.TryAddWithoutValidation("authorization", _authHeader);
+            req.Headers.TryAddWithoutValidation("accept", "application/json");
+            req.Headers.TryAddWithoutValidation("x-kraty-sdk", SdkUserAgent);
+            if (!string.IsNullOrEmpty(_platform))
+            {
+                req.Headers.TryAddWithoutValidation("x-kraty-platform", _platform);
+            }
+            if (!string.IsNullOrEmpty(_appVersion))
+            {
+                req.Headers.TryAddWithoutValidation("x-kraty-app-version", _appVersion);
+            }
+            var secret = _playerSecret;
+            if (!string.IsNullOrEmpty(secret))
+            {
+                req.Headers.TryAddWithoutValidation("x-player-secret", secret);
+            }
+            if (headers != null)
+            {
+                foreach (var h in headers) req.Headers.TryAddWithoutValidation(h.Key, h.Value);
+            }
+            if (body != null)
+            {
+                var payload = JsonConvert.SerializeObject(body, JsonOptions);
+                req.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+            }
+            return await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        }
+
+        private string? ResolveIdempotencyKey(HttpMethod method, object? body)
+        {
+            if (!IdempotentMethods.Contains(method)) return null;
+            if (body is IDictionary&lt;string, object?&gt; dict
+                &amp;&amp; dict.TryGetValue("idempotencyKey", out var v)
+                &amp;&amp; v is string s
+                &amp;&amp; !string.IsNullOrEmpty(s))
+            {
+                return s;
+            }
+            if (body is ProgressInput pi &amp;&amp; !string.IsNullOrEmpty(pi.IdempotencyKey)) return pi.IdempotencyKey;
+            if (body is ConsumeItemInput ci &amp;&amp; !string.IsNullOrEmpty(ci.IdempotencyKey)) return ci.IdempotencyKey;
+            if (body is DebitWalletInput di &amp;&amp; !string.IsNullOrEmpty(di.IdempotencyKey)) return di.IdempotencyKey;
+            return _generateIdempotencyKey();
+        }
+
+        private object? AttachIdempotencyKey(object? body, string? key)
+        {
+            if (key == null) return body;
+            if (body == null) return new Dictionary&lt;string, object?&gt; { ["idempotencyKey"] = key };
+
+            if (body is IDictionary&lt;string, object?&gt; dict)
+            {
+                if (!dict.ContainsKey("idempotencyKey")) dict["idempotencyKey"] = key;
+                return dict;
+            }
+
+            if (body is ProgressInput pi)
+            {
+                if (string.IsNullOrEmpty(pi.IdempotencyKey)) pi.IdempotencyKey = key;
+                return pi;
+            }
+            if (body is ConsumeItemInput ci)
+            {
+                if (string.IsNullOrEmpty(ci.IdempotencyKey)) ci.IdempotencyKey = key;
+                return ci;
+            }
+            if (body is DebitWalletInput di)
+            {
+                if (string.IsNullOrEmpty(di.IdempotencyKey)) di.IdempotencyKey = key;
+                return di;
+            }
+
+            // Newtonsoft equivalent of System.Text.Json's
+            // SerializeToNode: round-trip through JObject using the
+            // configured settings (camelCase + ignore-null), then
+            // attach the idempotency key if it isn't already there.
+            var serializer = JsonSerializer.Create(JsonOptions);
+            var node = JToken.FromObject(body, serializer);
+            if (node is JObject obj &amp;&amp; obj["idempotencyKey"] == null)
+            {
+                obj["idempotencyKey"] = key;
+            }
+            return node;
+        }
+
+        /// &lt;summary&gt;
+        /// True when the exception chain says the request never reached
+        /// a server: the hostname did not resolve, or there was no route
+        /// to the network. Distinguished from "the server answered badly"
+        /// so &lt;see cref="RequestAsync{T}"/&gt; can back off on a slower
+        /// ladder. Walks the whole chain because Mono's HTTP stack nests
+        /// the real cause under HttpRequestException -&gt; WebException.
+        /// &lt;/summary&gt;
+        private static bool IsConnectivityFailure(Exception? ex)
+        {
+            for (var e = ex; e != null; e = e.InnerException)
+            {
+                if (e is WebException we)
+                {
+                    switch (we.Status)
+                    {
+                        case WebExceptionStatus.NameResolutionFailure:
+                        case WebExceptionStatus.ProxyNameResolutionFailure:
+                        case WebExceptionStatus.ConnectFailure:
+                            return true;
+                    }
+                }
+
+                if (e is SocketException se)
+                {
+                    switch (se.SocketErrorCode)
+                    {
+                        case SocketError.HostNotFound:
+                        case SocketError.TryAgain:
+                        case SocketError.NoData:
+                        case SocketError.NoRecovery:
+                        case SocketError.HostUnreachable:
+                        case SocketError.NetworkUnreachable:
+                        case SocketError.NetworkDown:
+                            return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        private async Task SleepBackoffAsync(
+            int attempt,
+            HttpResponseMessage? res,
+            CancellationToken cancellationToken,
+            TimeSpan? baseDelay = null
+        )
+        {
+            if (res?.Headers.RetryAfter is RetryConditionHeaderValue ra)
+            {
+                if (ra.Delta is TimeSpan d)
+                {
+                    var capped = d &gt; _retry.MaxDelay ? _retry.MaxDelay : d;
+                    await Task.Delay(capped, cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+                if (ra.Date is DateTimeOffset dt)
+                {
+                    var d2 = dt - DateTimeOffset.UtcNow;
+                    if (d2 &lt; TimeSpan.Zero) d2 = TimeSpan.Zero;
+                    if (d2 &gt; _retry.MaxDelay) d2 = _retry.MaxDelay;
+                    await Task.Delay(d2, cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+            }
+
+            var baseMs = (baseDelay ?? _retry.InitialDelay).TotalMilliseconds * Math.Pow(2, attempt - 1);
+            if (baseMs &gt; _retry.MaxDelay.TotalMilliseconds) baseMs = _retry.MaxDelay.TotalMilliseconds;
+            double jittered;
+            lock (_jitterRng)
+            {
+                var rand = _jitterRng.NextDouble() * 2 - 1;
+                jittered = baseMs * (1 + rand * _retry.Jitter);
+            }
+            if (jittered &lt; 0) jittered = 0;
+            await Task.Delay(TimeSpan.FromMilliseconds(jittered), cancellationToken).ConfigureAwait(false);
+        }
+
+        private static KratyErrorPayload? TryParseErrorEnvelope(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            try
+            {
+                var root = JToken.Parse(text);
+                if (root.Type != JTokenType.Object) return null;
+                var err = root["error"];
+                if (err == null || err.Type != JTokenType.Object) return null;
+                var code = (string?)err["code"];
+                var msg = (string?)err["message"];
+                if (string.IsNullOrEmpty(code)) return null;
+                Dictionary&lt;string, object?&gt;? details = null;
+                var d = err["details"];
+                if (d != null)
+                {
+                    details = new Dictionary&lt;string, object?&gt; { ["raw"] = d.ToString(Formatting.None) };
+                }
+                return new KratyErrorPayload(code!, msg ?? string.Empty, details);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static async Task&lt;KratyApiError&gt; AsApiErrorAsync(HttpResponseMessage res)
+        {
+            var text = await res.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var env = TryParseErrorEnvelope(text);
+            var err = env != null
+                ? new KratyApiError((int)res.StatusCode, env.Code, env.Message, env.Details)
+                : new KratyApiError(
+                    (int)res.StatusCode,
+                    KratyErrorCode.InternalError,
+                    $"non-2xx response without an error envelope (status={(int)res.StatusCode})"
+                );
+            err.RetryAfterHeader = ReadRetryAfter(res);
+            return err;
+        }
+
+        /// &lt;summary&gt;The response's &lt;c&gt;Retry-After&lt;/c&gt; (seconds or a date) as a delay, or null.&lt;/summary&gt;
+        internal static TimeSpan? ReadRetryAfter(HttpResponseMessage res)
+        {
+            var ra = res.Headers.RetryAfter;
+            if (ra == null) return null;
+            if (ra.Delta is TimeSpan d) return d &lt; TimeSpan.Zero ? TimeSpan.Zero : d;
+            if (ra.Date is DateTimeOffset dt)
+            {
+                var left = dt - DateTimeOffset.UtcNow;
+                return left &lt; TimeSpan.Zero ? TimeSpan.Zero : left;
+            }
+            return null;
+        }
+
+        // Self-serve externalPlayerId for fresh signups. Prefixed so a
+        // glance at the audit log distinguishes SDK-minted ids from
+        // your own. UUID v4 under the hood, so collision resistance is
+        // good enough for the lifetime of a single device.
+        private static string GenerateExternalPlayerId()
+        {
+            return $"kp_{Guid.NewGuid().ToString("N")}";
+        }
+
+        // ── Finalization catch-up (docs/05b) ─────────────────────────
+        // OnFinalized fires when a board the player is in ends: live over
+        // SSE while subscribed, OR via CheckFinalizationsAsync for boards
+        // that finalized while they were away. Both paths deliver exactly
+        // once. DismissAsync/ClearReportedAsync acknowledge handled results.
+
+        /// &lt;summary&gt;Register a finalization handler. Returns an unsubscribe action.&lt;/summary&gt;
+        public Action OnFinalized(Action&lt;FinalizationResult&gt; cb) =&gt; _finalization.OnFinalized(cb);
+
+        /// &lt;summary&gt;Poll tracked boards; report + return any that finalized while away.
+        /// Call on app foreground / reconnect.&lt;/summary&gt;
+        public Task&lt;List&lt;FinalizationResult&gt;&gt; CheckFinalizationsAsync() =&gt; _finalization.CheckFinalizationsAsync();
+
+        /// &lt;summary&gt;Acknowledge a handled finalization; drop it from the registry.&lt;/summary&gt;
+        public Task DismissAsync(MembershipRef @ref) =&gt; _finalization.DismissAsync(@ref);
+
+        /// &lt;summary&gt;Bulk-drop every already-reported membership. Returns the count.&lt;/summary&gt;
+        public Task&lt;int&gt; ClearReportedAsync() =&gt; _finalization.ClearReportedAsync();
+
+        // Called by EventsClient.StartAsync to record the board the player just
+        // joined. Fire-and-forget; must never add latency or throw into start.
+        internal Task TrackMembershipAsync(MembershipRef @ref) =&gt; _finalization.TrackAsync(@ref);
+
+        // Called by the live leaderboard subscription when a `finalized` SSE
+        // event arrives; routes through the same single writer as catch-up so
+        // the registry is updated (not just the callback fired). See docs/05b.
+        internal Task RouteFinalizedAsync(string leaderboardId, IDictionary&lt;string, JToken&gt;? data) =&gt;
+            _finalization.OnStreamFinalizedAsync(leaderboardId, data);
+
+        // ── Server clock ─────────────────────────────────────────────
+        // A trustworthy time source: fetch the server's clock so game timers
+        // (event countdowns, etc.) can't be cheated by changing the device
+        // clock. Compare the returned epoch / ServerNow() against event endsAt.
+
+        /// &lt;summary&gt;
+        /// Fetch the server's current time. &lt;see cref="ServerTime.EpochMs"/&gt;
+        /// (UTC) is the value to compare against an event's &lt;c&gt;endsAt&lt;/c&gt;: a
+        /// player can change their device clock to fake a still-running event,
+        /// so timer checks should rely on the server clock, not the device one.
+        /// Pass &lt;paramref name="timezone"/&gt; (an IANA name, e.g.
+        /// &lt;c&gt;"Europe/Lisbon"&lt;/c&gt;) to also receive that zone's wall-clock
+        /// (&lt;see cref="ServerTime.Local"/&gt;) + &lt;see cref="ServerTime.OffsetMinutes"/&gt;
+        /// for display — comparisons should still use
+        /// &lt;see cref="ServerTime.EpochMs"/&gt;. An invalid IANA name returns HTTP
+        /// 400 (surfaced as a &lt;see cref="KratyApiError"/&gt;).
+        /// &lt;/summary&gt;
+        public async Task&lt;ServerTime&gt; GetServerTimeAsync(string? timezone = null, CancellationToken ct = default)
+        {
+            var qs = string.IsNullOrEmpty(timezone)
+                ? string.Empty
+                : $"?timezone={Uri.EscapeDataString(timezone!)}";
+            var env = await RequestAsync&lt;DataEnvelope&lt;ServerTime&gt;&gt;(
+                HttpMethod.Get,
+                $"/sdk/v1/time{qs}",
+                cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? throw new KratyNetworkError("kraty: server time response had no data");
+        }
+
+        /// &lt;summary&gt;
+        /// Anchor a tamper-proof clock: fetch the server time once and pin it to
+        /// a MONOTONIC reference (a &lt;see cref="System.Diagnostics.Stopwatch"/&gt;,
+        /// driven by the performance counter rather than the wall-clock), so
+        /// &lt;see cref="ServerNow"/&gt; / &lt;see cref="ServerNowMs"/&gt; keep ticking
+        /// correctly even if the player changes their device clock afterwards.
+        /// Call at startup and again on app resume. Network latency introduces
+        /// at most a sub-second skew, negligible for event timers.
+        /// &lt;/summary&gt;
+        public async Task SyncTimeAsync(CancellationToken ct = default)
+        {
+            var t = await GetServerTimeAsync(timezone: null, ct: ct).ConfigureAwait(false);
+            _timeAnchor = (t.EpochMs, MonotonicNowMs());
+        }
+
+        /// &lt;summary&gt;True once &lt;see cref="SyncTimeAsync"/&gt; has succeeded at least once.&lt;/summary&gt;
+        public bool IsTimeSynced =&gt; _timeAnchor != null;
+
+        /// &lt;summary&gt;
+        /// Current server time as Unix epoch ms (UTC), derived from the last
+        /// &lt;see cref="SyncTimeAsync"/&gt; anchor + monotonic elapsed — safe against
+        /// device-clock tampering. Compare it against an event's &lt;c&gt;endsAt&lt;/c&gt;.
+        /// Throws &lt;see cref="InvalidOperationException"/&gt; if
+        /// &lt;see cref="SyncTimeAsync"/&gt; hasn't run yet.
+        /// &lt;/summary&gt;
+        public long ServerNowMs()
+        {
+            if (_timeAnchor == null)
+            {
+                throw new InvalidOperationException(
+                    "kraty: call SyncTimeAsync() before ServerNow()/ServerNowMs()");
+            }
+            var anchor = _timeAnchor.Value;
+            return anchor.ServerMs + (MonotonicNowMs() - anchor.MonoMs);
+        }
+
+        /// &lt;summary&gt;
+        /// &lt;see cref="ServerNowMs"/&gt; as a UTC &lt;see cref="DateTime"/&gt;. Throws
+        /// &lt;see cref="InvalidOperationException"/&gt; if not yet synced.
+        /// &lt;/summary&gt;
+        public DateTime ServerNow() =&gt;
+            DateTimeOffset.FromUnixTimeMilliseconds(ServerNowMs()).UtcDateTime;
+
+        // Monotonic milliseconds from the long-lived Stopwatch. Immune to device
+        // wall-clock changes (the counter can only ever advance), which is what
+        // makes the server-time anchor tamper-proof.
+        private long MonotonicNowMs() =&gt; _monoClock.ElapsedMilliseconds;
+
+        // Picks PlayerPrefsSecretStore on Unity, in-memory elsewhere.
+        // Most game clients never need to override; the default does
+        // the right thing per platform.
+        private static ISecretStore DefaultSecretStore()
+        {
+#if UNITY_5_3_OR_NEWER
+            return new PlayerPrefsSecretStore();
+#else
+            return new InMemorySecretStore();
+#endif
+        }
+
+        // Same per-platform split for the finalization registry.
+        private static IMembershipStore DefaultMembershipStore()
+        {
+#if UNITY_5_3_OR_NEWER
+            return new PlayerPrefsMembershipStore();
+#else
+            return new InMemoryMembershipStore();
+#endif
+        }
+    }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

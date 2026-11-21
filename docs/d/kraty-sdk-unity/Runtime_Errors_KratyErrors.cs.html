@@ -1,0 +1,384 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-unity/Runtime/Errors/KratyErrors.cs</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-unity/Runtime/Errors/KratyErrors.cs</h1><p class=muted>kraty-sdk-unity/Runtime/Errors/KratyErrors.cs</p><pre><code class="language-csharp">using System;
+using System.Collections.Generic;
+
+namespace Kraty
+{
+    /// &lt;summary&gt;
+    /// Sealed-ish set of error codes the backend returns. Mirrors
+    /// &lt;c&gt;api/errors.ts&lt;/c&gt; on the backend. Kept as constants (rather
+    /// than an enum) so the SDK survives the platform adding a new
+    /// code without a forced release; consumers compare on strings,
+    /// with the constants below as the canonical names.
+    /// &lt;/summary&gt;
+    public static class KratyErrorCode
+    {
+        // ── core ─────────────────────────────────────────────────────
+        public const string Unauthenticated = "unauthenticated";
+        public const string SessionInvalid = "session_invalid";
+        public const string Forbidden = "forbidden";
+        public const string NotFound = "not_found";
+        public const string ValidationFailed = "validation_failed";
+        public const string Conflict = "conflict";
+        public const string RateLimited = "rate_limited";
+        public const string InternalError = "internal_error";
+        public const string TenantMismatch = "tenant_mismatch";
+        public const string IdempotencyConflict = "idempotency_conflict";
+
+        // ── per-player auth ──────────────────────────────────────────
+        public const string PlayerSecretInvalid = "player_secret_invalid";
+        public const string PlayerAlreadyRegistered = "player_already_registered";
+
+        // ── events / attempts ────────────────────────────────────────
+        public const string EventDisabled = "event_disabled";
+        public const string NoActiveWindow = "no_active_window";
+        public const string NoLeaderboard = "no_leaderboard";
+        public const string MaxAttemptsReached = "max_attempts_reached";
+        public const string MaxDailyAttemptsReached = "max_daily_attempts_reached";
+        public const string AttemptFinished = "attempt_finished";
+        public const string InvalidMetric = "invalid_metric";
+        public const string UnlockConditionFailed = "unlock_condition_failed";
+        public const string InvalidUnlockCondition = "invalid_unlock_condition";
+
+        // ── entry requirements / cost ────────────────────────────────
+        public const string EntryRequirementFailed = "entry_requirement_failed";
+        public const string InvalidEntryRequirement = "invalid_entry_requirement";
+        public const string InsufficientEntryCost = "insufficient_entry_cost";
+
+        // ── matchmaking ──────────────────────────────────────────────
+        public const string LobbyForming = "lobby_forming";
+
+        // ── inventory ────────────────────────────────────────────────
+        public const string InventoryNotPermissive = "inventory_not_permissive";
+
+        // ── chat anti-spam ───────────────────────────────────────────
+        public const string ChatSlowMode = "chat_slow_mode";
+        public const string ChatDuplicateMessage = "chat_duplicate_message";
+        public const string ChatRateLimited = "chat_rate_limited";
+        public const string ChatMuted = "chat_muted";
+    }
+
+    /// &lt;summary&gt;
+    /// Backend error envelope: every non-2xx response (and the special
+    /// 202 lobby-forming response) carries this shape.
+    /// &lt;/summary&gt;
+    public sealed class KratyErrorPayload
+    {
+        public string Code { get; }
+        public string Message { get; }
+        public IReadOnlyDictionary&lt;string, object?&gt;? Details { get; }
+
+        public KratyErrorPayload(string code, string message, IReadOnlyDictionary&lt;string, object?&gt;? details = null)
+        {
+            Code = code;
+            Message = message;
+            Details = details;
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// Thrown for every non-2xx response (and the 202 lobby-forming
+    /// case). &lt;see cref="Status"/&gt; is the HTTP status, &lt;see cref="Code"/&gt;
+    /// + &lt;c&gt;Message&lt;/c&gt; come from the backend's
+    /// &lt;c&gt;{ error: { code, message, details? } }&lt;/c&gt; envelope.
+    ///
+    /// Use the typed &lt;c&gt;Is...&lt;/c&gt; properties to switch on the common
+    /// SDK-relevant codes: they're cheaper to read than a chain of
+    /// string comparisons and immune to typos.
+    /// &lt;/summary&gt;
+    public sealed class KratyApiError : Exception
+    {
+        public int Status { get; }
+        public string Code { get; }
+        public IReadOnlyDictionary&lt;string, object?&gt;? Details { get; }
+
+        public KratyApiError(int status, string code, string message, IReadOnlyDictionary&lt;string, object?&gt;? details = null)
+            : base($"[{status}] {code}: {message}")
+        {
+            Status = status;
+            Code = code;
+            Details = details;
+        }
+
+        /// &lt;summary&gt;
+        /// The response's &lt;c&gt;Retry-After&lt;/c&gt; header, when it had one (set by
+        /// the SDK's transport; null on errors built by hand). The chat outbox
+        /// and the stream reconnect honour it on a 503.
+        /// &lt;/summary&gt;
+        internal TimeSpan? RetryAfterHeader { get; set; }
+
+        /// &lt;summary&gt;
+        /// How long the server asked us to wait: the &lt;c&gt;Retry-After&lt;/c&gt; header,
+        /// else &lt;c&gt;details.retryAfterSeconds&lt;/c&gt;, else null.
+        /// &lt;/summary&gt;
+        internal TimeSpan? ServerRetryAfter =&gt;
+            RetryAfterHeader ?? (RetryAfterSecondsExact is double s ? TimeSpan.FromSeconds(s) : (TimeSpan?)null);
+
+        /// &lt;summary&gt;
+        /// Generic code matcher. Useful when matching on a code the
+        /// SDK doesn't yet have a typed getter for (e.g. a new code
+        /// the backend added before an SDK release).
+        /// &lt;/summary&gt;
+        public bool Is(string code) =&gt; Code == code;
+
+        // ── core ─────────────────────────────────────────────────────
+
+        /// &lt;summary&gt;401: &lt;c&gt;Authorization&lt;/c&gt; header missing on a protected route.&lt;/summary&gt;
+        public bool IsUnauthenticated =&gt; Code == KratyErrorCode.Unauthenticated;
+
+        /// &lt;summary&gt;401: Bearer token is malformed, revoked, or rejected.&lt;/summary&gt;
+        public bool IsSessionInvalid =&gt; Code == KratyErrorCode.SessionInvalid;
+
+        /// &lt;summary&gt;403: authenticated but lacks the permission for this route.&lt;/summary&gt;
+        public bool IsForbidden =&gt; Code == KratyErrorCode.Forbidden;
+
+        /// &lt;summary&gt;404: referenced resource doesn't exist or is archived.&lt;/summary&gt;
+        public bool IsNotFound =&gt; Code == KratyErrorCode.NotFound;
+
+        /// &lt;summary&gt;400: request body / query failed schema validation. &lt;c&gt;Details&lt;/c&gt; carries field-level errors.&lt;/summary&gt;
+        public bool IsValidationFailed =&gt; Code == KratyErrorCode.ValidationFailed;
+
+        /// &lt;summary&gt;409: generic mutation conflict. More specific 409 codes get their own getters; this catches the rest.&lt;/summary&gt;
+        public bool IsConflict =&gt; Code == KratyErrorCode.Conflict;
+
+        /// &lt;summary&gt;429: per-key rate limit exceeded. The SDK auto-retries with backoff before surfacing this.&lt;/summary&gt;
+        public bool IsRateLimited =&gt; Code == KratyErrorCode.RateLimited;
+
+        /// &lt;summary&gt;500: unhandled exception. Surface a generic "something went wrong" to the player.&lt;/summary&gt;
+        public bool IsInternalError =&gt; Code == KratyErrorCode.InternalError;
+
+        /// &lt;summary&gt;403: cross-studio access attempt (RLS rejected). Shouldn't happen via the SDK.&lt;/summary&gt;
+        public bool IsTenantMismatch =&gt; Code == KratyErrorCode.TenantMismatch;
+
+        /// &lt;summary&gt;
+        /// 409: same &lt;c&gt;idempotencyKey&lt;/c&gt; used with a different
+        /// request body within the 24h cache TTL. The SDK auto-stamps
+        /// fresh keys per write so you only see this when you've
+        /// supplied your own key.
+        /// &lt;/summary&gt;
+        public bool IsIdempotencyConflict =&gt; Code == KratyErrorCode.IdempotencyConflict;
+
+        // ── per-player auth ──────────────────────────────────────────
+
+        /// &lt;summary&gt;
+        /// 401: &lt;c&gt;X-Player-Secret&lt;/c&gt; is missing, malformed, or
+        /// doesn't match the stored hash for the player. Triggers
+        /// your re-authentication flow (usually wipe the local
+        /// secret + re-call &lt;see cref="Kraty.ConnectAsPlayerAsync"/&gt;).
+        /// &lt;/summary&gt;
+        public bool IsPlayerSecretInvalid =&gt; Code == KratyErrorCode.PlayerSecretInvalid;
+
+        /// &lt;summary&gt;
+        /// 409: the player already has a registered secret.
+        /// &lt;see cref="Kraty.ConnectAsPlayerAsync"/&gt; handles this
+        /// automatically by retrying with &lt;c&gt;force=true&lt;/c&gt; in dev
+        /// /test envs; in production keys this surfaces here and
+        /// should route to your account-recovery flow.
+        /// &lt;/summary&gt;
+        public bool IsPlayerAlreadyRegistered =&gt; Code == KratyErrorCode.PlayerAlreadyRegistered;
+
+        // ── events / attempts ────────────────────────────────────────
+
+        /// &lt;summary&gt;409: the event is configured but disabled.&lt;/summary&gt;
+        public bool IsEventDisabled =&gt; Code == KratyErrorCode.EventDisabled;
+
+        /// &lt;summary&gt;409: the event has no currently-active window. Player is between scheduled windows.&lt;/summary&gt;
+        public bool IsNoActiveWindow =&gt; Code == KratyErrorCode.NoActiveWindow;
+
+        /// &lt;summary&gt;503: server couldn't allocate / find the leaderboard. Usually transient, so retry after backoff.&lt;/summary&gt;
+        public bool IsNoLeaderboard =&gt; Code == KratyErrorCode.NoLeaderboard;
+
+        /// &lt;summary&gt;429: player burned all attempts for the current event window.&lt;/summary&gt;
+        public bool IsMaxAttemptsReached =&gt; Code == KratyErrorCode.MaxAttemptsReached;
+
+        /// &lt;summary&gt;429: per-day attempt cap reached. Player should wait until midnight in the event's timezone.&lt;/summary&gt;
+        public bool IsMaxDailyAttemptsReached =&gt; Code == KratyErrorCode.MaxDailyAttemptsReached;
+
+        /// &lt;summary&gt;409: reported progress on an attempt that's already &lt;c&gt;completed&lt;/c&gt; / &lt;c&gt;expired&lt;/c&gt;. Refresh state.&lt;/summary&gt;
+        public bool IsAttemptFinished =&gt; Code == KratyErrorCode.AttemptFinished;
+
+        /// &lt;summary&gt;400: &lt;c&gt;progress&lt;/c&gt; referenced a metric key the event doesn't declare. SDK / game-config bug.&lt;/summary&gt;
+        public bool IsInvalidMetric =&gt; Code == KratyErrorCode.InvalidMetric;
+
+        /// &lt;summary&gt;403: player can't see the event yet (visibility gate failed).&lt;/summary&gt;
+        public bool IsUnlockConditionFailed =&gt; Code == KratyErrorCode.UnlockConditionFailed;
+
+        /// &lt;summary&gt;500: event config has a malformed unlock condition tree. Operator should fix in the portal.&lt;/summary&gt;
+        public bool IsInvalidUnlockCondition =&gt; Code == KratyErrorCode.InvalidUnlockCondition;
+
+        // ── entry requirements / cost ────────────────────────────────
+
+        /// &lt;summary&gt;
+        /// 403: player attempted an event whose entry requirement
+        /// failed (e.g. "must own item X"). Show a locked-event
+        /// dialog or surface what's missing from the message.
+        /// &lt;/summary&gt;
+        public bool IsEntryRequirementFailed =&gt; Code == KratyErrorCode.EntryRequirementFailed;
+
+        /// &lt;summary&gt;500: event config has a malformed entry requirement.&lt;/summary&gt;
+        public bool IsInvalidEntryRequirement =&gt; Code == KratyErrorCode.InvalidEntryRequirement;
+
+        /// &lt;summary&gt;
+        /// 402: paid event the player can't afford. &lt;c&gt;Message&lt;/c&gt;
+        /// names the shortfall resource ("not enough cash to enter;
+        /// need 50"). Surface a "buy more X" prompt or a free-event
+        /// fallback. The server's atomic debit was rolled back, so
+        /// partial debits never persist.
+        /// &lt;/summary&gt;
+        public bool IsInsufficientEntryCost =&gt; Code == KratyErrorCode.InsufficientEntryCost;
+
+        // ── matchmaking ──────────────────────────────────────────────
+
+        /// &lt;summary&gt;
+        /// 202: lobby-matched event whose lobby isn't yet at capacity.
+        /// Not a hard failure: poll the lobby endpoint (using
+        /// &lt;c&gt;Details["lobbyId"]&lt;/c&gt;) and retry &lt;c&gt;events.start&lt;/c&gt;
+        /// once it transitions out of &lt;c&gt;forming&lt;/c&gt;.
+        /// &lt;/summary&gt;
+        public bool IsLobbyForming =&gt; Code == KratyErrorCode.LobbyForming;
+
+        /// &lt;summary&gt;
+        /// 403: a client-side &lt;c&gt;GrantAsync&lt;/c&gt; on a game whose inventory
+        /// management isn't &lt;c&gt;permissive&lt;/c&gt;. Enable it in the game's
+        /// Settings, or grant from your backend with a
+        /// &lt;c&gt;server_integration&lt;/c&gt; key.
+        /// &lt;/summary&gt;
+        public bool IsInventoryNotPermissive =&gt; Code == KratyErrorCode.InventoryNotPermissive;
+
+        // ── chat anti-spam ───────────────────────────────────────────
+        // Chat sends and edits are never auto-retried on 429: a retried
+        // refusal is another spam strike, and enough strikes mute the
+        // player automatically.
+
+        /// &lt;summary&gt;429: sent again before the conversation's cooldown passed.&lt;/summary&gt;
+        public bool IsChatSlowMode =&gt; Code == KratyErrorCode.ChatSlowMode;
+
+        /// &lt;summary&gt;429: the same text again in this conversation within the duplicate window.&lt;/summary&gt;
+        public bool IsChatDuplicateMessage =&gt; Code == KratyErrorCode.ChatDuplicateMessage;
+
+        /// &lt;summary&gt;429: over the game's messages-per-minute.&lt;/summary&gt;
+        public bool IsChatRateLimited =&gt; Code == KratyErrorCode.ChatRateLimited;
+
+        /// &lt;summary&gt;
+        /// 403: the player is muted. Repeated spam refusals mute
+        /// automatically; an &lt;c&gt;OnRestriction&lt;/c&gt; event arrives on the chat
+        /// stream too.
+        /// &lt;/summary&gt;
+        public bool IsChatMuted =&gt; Code == KratyErrorCode.ChatMuted;
+
+        /// &lt;summary&gt;
+        /// Seconds to wait before trying again (&lt;c&gt;details.retryAfterSeconds&lt;/c&gt;,
+        /// on the chat 429s), or null when the error carries none. Don't
+        /// resend sooner.
+        /// &lt;/summary&gt;
+        public int? RetryAfterSeconds =&gt;
+            RetryAfterSecondsExact is double s ? (int)Math.Ceiling(s) : (int?)null;
+
+        private double? RetryAfterSecondsExact
+        {
+            get
+            {
+                if (Details == null || !Details.TryGetValue("raw", out var raw) || !(raw is string json)) return null;
+                try
+                {
+                    var v = Newtonsoft.Json.Linq.JObject.Parse(json)["retryAfterSeconds"];
+                    if (v == null || (v.Type != Newtonsoft.Json.Linq.JTokenType.Integer &amp;&amp; v.Type != Newtonsoft.Json.Linq.JTokenType.Float)) return null;
+                    return Math.Max(0, (double)v);
+                }
+                catch (Newtonsoft.Json.JsonException)
+                {
+                    return null;
+                }
+            }
+        }
+
+        /// &lt;summary&gt;
+        /// True when the SDK refused the call itself, without a request: a
+        /// chat send while the conversation's cooldown is still running
+        /// (&lt;c&gt;details.local: true&lt;/c&gt;). Not a spam strike.
+        /// &lt;/summary&gt;
+        public bool IsLocal
+        {
+            get
+            {
+                if (Details == null || !Details.TryGetValue("raw", out var raw) || !(raw is string json)) return false;
+                try
+                {
+                    var v = Newtonsoft.Json.Linq.JObject.Parse(json)["local"];
+                    return v != null &amp;&amp; v.Type == Newtonsoft.Json.Linq.JTokenType.Boolean &amp;&amp; (bool)v;
+                }
+                catch (Newtonsoft.Json.JsonException)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// Network / HTTP-layer failure that didn't produce an HTTP
+    /// response (DNS, socket reset, timeout, etc.). The SDK
+    /// auto-retries network errors with backoff before surfacing
+    /// this; by the time you see one, the retry budget is exhausted.
+    /// &lt;see cref="KratyChatNotSentError"/&gt; derives from it, so an existing
+    /// &lt;c&gt;catch (KratyNetworkError)&lt;/c&gt; also catches a chat message the
+    /// outbox gave up on.
+    /// &lt;/summary&gt;
+    public class KratyNetworkError : Exception
+    {
+        public Exception? OriginalCause { get; }
+
+        public KratyNetworkError(string message, Exception? originalCause = null)
+            : base(message, originalCause)
+        {
+            OriginalCause = originalCause;
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// A chat message (or edit) the outbox could not deliver within
+    /// &lt;see cref="KratyClientOptions.ChatOutboxTimeout"/&gt;: the server stayed
+    /// busy (5xx) or the network stayed down the whole time. Nothing was
+    /// refused, so it is safe to try again: show the message as "not sent,
+    /// tap to retry" and call &lt;see cref="RetryAsync"/&gt; (or send again with
+    /// the same &lt;see cref="ClientMessageId"/&gt;). The server dedupes by
+    /// &lt;c&gt;clientMessageId&lt;/c&gt;, so a retry never posts twice, even if an
+    /// earlier attempt did reach it.
+    /// &lt;/summary&gt;
+    public sealed class KratyChatNotSentError : KratyNetworkError
+    {
+        private readonly Func&lt;System.Threading.CancellationToken, System.Threading.Tasks.Task&lt;ChatMessage&gt;&gt; _resend;
+
+        /// &lt;summary&gt;The conversation the message was for.&lt;/summary&gt;
+        public string ConversationId { get; }
+
+        /// &lt;summary&gt;The id the message was sent with; null for an edit.&lt;/summary&gt;
+        public string? ClientMessageId { get; }
+
+        /// &lt;summary&gt;The last failure seen: a &lt;see cref="KratyNetworkError"/&gt; or a 5xx &lt;see cref="KratyApiError"/&gt;.&lt;/summary&gt;
+        public Exception LastError { get; }
+
+        internal KratyChatNotSentError(
+            string message,
+            string conversationId,
+            string? clientMessageId,
+            Exception lastError,
+            Func&lt;System.Threading.CancellationToken, System.Threading.Tasks.Task&lt;ChatMessage&gt;&gt; resend)
+            : base(message, lastError)
+        {
+            ConversationId = conversationId;
+            ClientMessageId = clientMessageId;
+            LastError = lastError;
+            _resend = resend;
+        }
+
+        /// &lt;summary&gt;
+        /// Sends it again through the outbox: same body, same
+        /// &lt;see cref="ClientMessageId"/&gt;, a fresh timeout budget. For an edit,
+        /// re-runs the edit. Resolves with the message.
+        /// &lt;/summary&gt;
+        public System.Threading.Tasks.Task&lt;ChatMessage&gt; RetryAsync(System.Threading.CancellationToken ct = default) =&gt; _resend(ct);
+    }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

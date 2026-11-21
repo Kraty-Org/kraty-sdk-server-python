@@ -1,0 +1,70 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-server-python/pyproject.toml</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-server-python/pyproject.toml</h1><p class=muted>kraty-sdk-server-python/pyproject.toml</p><pre><code class="language-text">[project]
+name = "kraty-server-sdk"
+version = "0.18.0"
+description = "Python server SDK for the Kraty game-events platform, covering per-game server-side actions: manual grants, IAP fulfilment, inventory grant/revoke, wallet credit/debit, push-lobbies, webhook verification. Targets the /server/v1 surface."
+readme = "README.md"
+requires-python = "&gt;=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "Kraty" }]
+keywords = ["kraty", "events", "leaderboard", "grants", "live-ops"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "httpx&gt;=0.27,&lt;1.0",
+]
+
+[project.urls]
+Homepage = "https://kraty.app"
+Documentation = "https://kraty.app/docs/server-sdks/python"
+
+[build-system]
+requires = ["hatchling&gt;=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kraty_server_sdk"]
+
+[dependency-groups]
+dev = [
+  "pytest&gt;=8.0",
+  "pytest-asyncio&gt;=0.23",
+  "respx&gt;=0.21",
+  "ruff&gt;=0.6",
+  "mypy&gt;=1.10",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "PL"]
+ignore = [
+  "PLR0913",  # too many args: public API methods deliberately use lots of kwargs
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test assertions naturally compare against literal values; muting the
+# magic-value rule there keeps the noise floor low without hiding it
+# in production code.
+"tests/*" = ["PLR2004", "PLR0915"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_configs = true
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

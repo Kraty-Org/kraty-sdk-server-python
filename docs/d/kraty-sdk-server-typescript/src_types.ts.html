@@ -1,0 +1,1182 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-server-typescript/src/types.ts</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-server-typescript/src/types.ts</h1><p class=muted>kraty-sdk-server-typescript/src/types.ts</p><pre><code class="language-typescript">/**
+ * Wire types for the `/server/v1` surface, mirroring the OpenAPI
+ * spec at `apps/backend/openapi.server.json`. Server-side admin
+ * operations: manual grants, IAP fulfilment, inventory grant/revoke,
+ * wallet credit/debit, lobby push, player snapshot lookups.
+ */
+
+// ─── Grants ────────────────────────────────────────────────────────
+
+/**
+ * One reward entry inside a manual grant. Discriminated by `type`.
+ */
+export type GrantEntry =
+  | { type: 'currency'; currencyKey: string; amount: number }
+  | { type: 'item'; itemKey: string; quantity: number; parameters?: Record&lt;string, unknown&gt; }
+  | { type: 'crate'; crateItemKey: string; quantity: number };
+
+export interface CreateGrantInput {
+  /**
+   * Required: your idempotency token. Reusing the same key with the
+   * same body returns the original grant; reusing it with a DIFFERENT
+   * body returns 409 `idempotency_conflict`. Usually the IAP receipt
+   * id or your internal fulfilment id.
+   */
+  idempotencyKey: string;
+  /** Defaults to `'reward'`. Crate grants must be `/open`-ed by the player to roll their contents. */
+  kind?: 'reward' | 'crate';
+  /** At least one entry. Mix of currencies, items, and crates is allowed. */
+  entries: GrantEntry[];
+  /** Optional ISO datetime; grant expires (unclaimable) after this. */
+  expiresAt?: string;
+  /** Defaults to `'api'`. Use `'admin'` for portal-operator overrides. */
+  sourceKind?: 'api' | 'admin';
+  /** Free-form tracing id (e.g. IAP receipt id). Surfaces in audit + webhooks. */
+  sourceRefId?: string;
+  /** Free-form metadata blob: store receipt body, attribution, etc. */
+  metadata?: Record&lt;string, unknown&gt;;
+}
+
+export type GrantKind = 'reward' | 'crate';
+export type GrantStatus = 'pending' | 'claimed' | 'expired';
+
+export interface Grant {
+  id: string;
+  kind: GrantKind;
+  contents: Record&lt;string, unknown&gt;;
+  sourceKind: string;
+  sourceRefId: string | null;
+  parentGrantId: string | null;
+  status: GrantStatus;
+  rolledAt: string | null;
+  claimedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+}
+
+export interface AckGrantInput {
+  idempotencyKey?: string;
+}
+
+// ─── Inventory + wallet (server-side mints + revokes) ──────────────
+
+export interface AdjustItemInput {
+  /** Positive integer. The server validates and returns 400 on zero / negative. */
+  quantity: number;
+  /** Free-form ledger tag (e.g. `'iap_fulfillment'`, `'chargeback'`). */
+  reason?: string;
+  /** Tracing id, usually the IAP receipt or refund id. */
+  sourceRefId?: string;
+  /** Auto-stamped by the SDK if omitted. */
+  idempotencyKey?: string;
+}
+
+export interface AdjustWalletInput {
+  amount: number;
+  reason?: string;
+  sourceRefId?: string;
+  idempotencyKey?: string;
+}
+
+export interface AdjustItemResult {
+  itemKey: string;
+  quantity: number;
+  applied: boolean;
+}
+
+export interface AdjustWalletResult {
+  economyKey: string;
+  balance: number;
+  applied: boolean;
+}
+
+// ─── Push lobbies ──────────────────────────────────────────────────
+
+export interface PushLobbyInput {
+  /** Studio-owned lobby id, used as the idempotency token. */
+  key: string;
+  /** External player ids. Upserted as players if they don't exist yet. */
+  externalPlayerIds: string[];
+  /** Override capacity. Defaults to the event's `leaderboard.capacity`. */
+  capacity?: number;
+  /** Override bot fill. Defaults to the event's `leaderboard.fillBots`. */
+  fillBots?: boolean;
+  /** Free-form metadata stored on the lobby row. */
+  metadata?: Record&lt;string, unknown&gt;;
+}
+
+export type LobbyStatus = 'forming' | 'active' | 'closed';
+
+export interface Lobby {
+  id: string;
+  eventId: string;
+  eventWindowId: string;
+  leaderboardId: string | null;
+  mode: string;
+  status: LobbyStatus | string;
+  capacity: number;
+  fillBy: string | null;
+  participantCount: number;
+  botSlots?: number;
+  startedAt: string | null;
+  endsAt: string | null;
+}
+
+// ─── Player snapshot ───────────────────────────────────────────────
+
+/**
+ * Server-side player view: unified snapshot returned by
+ * `GET /server/v1/players/:externalId`. Wider than the client-side
+ * shape: includes the audit-relevant fields a studio backend needs
+ * for support tooling.
+ */
+export interface PlayerSnapshot {
+  player: {
+    id: string;
+    externalPlayerId: string;
+    studioId: string;
+    gameId: string;
+    createdAt: string;
+    updatedAt: string;
+  };
+  inventory: Array&lt;{
+    itemKey: string;
+    quantity: number;
+    metadata: Record&lt;string, unknown&gt;;
+    createdAt: string;
+    updatedAt: string;
+  }&gt;;
+  wallet: Array&lt;{
+    economyKey: string;
+    balance: number;
+    metadata: Record&lt;string, unknown&gt;;
+    createdAt: string;
+    updatedAt: string;
+  }&gt;;
+  recentGrants: Grant[];
+}
+
+// ─── GDPR (Right of Erasure + Right of Access) ─────────────────────
+
+export type ErasureReason = 'gdpr_erasure' | 'studio_request' | 'test';
+
+export interface DeletePlayerInput {
+  /**
+   * Legal basis recorded on the audit row. Defaults server-side to
+   * `'gdpr_erasure'`. Pass `'studio_request'` for account-closure
+   * deletions that aren't regulatory, or `'test'` for dev cleanups.
+   */
+  reason?: ErasureReason;
+}
+
+export type DeletePlayerStatus =
+  | 'erased'
+  | 'no_op_already_erased'
+  | 'no_op_never_existed';
+
+export interface DeletePlayerResult {
+  /** Internal player UUID; null when the player never existed in Kraty. */
+  playerId: string | null;
+  /** The original external id you requested erasure for. */
+  externalPlayerId: string;
+  /** `__deleted_&lt;uuid&gt;__` placeholder the row carries post-erasure. */
+  anonymizedExternalId: string | null;
+  deletedAt: string;
+  attemptsAnonymized: number;
+  lobbiesAnonymized: number;
+  leaderboardsScrubbed: number;
+  status: DeletePlayerStatus;
+}
+
+export interface PlayerExport {
+  schemaVersion: 1;
+  exportedAt: string;
+  player: {
+    id: string;
+    externalPlayerId: string;
+    studioId: string;
+    gameId: string;
+    firstSeenAt: string;
+    lastSeenAt: string;
+    lastContextSnapshot: Record&lt;string, unknown&gt; | null;
+    registeredAt: string | null;
+    secretRotatedAt: string | null;
+    deletedAt: string | null;
+  };
+  attempts: Array&lt;Record&lt;string, unknown&gt;&gt;;
+  grants: Array&lt;Record&lt;string, unknown&gt;&gt;;
+  inventory: Array&lt;Record&lt;string, unknown&gt;&gt;;
+  wallet: Array&lt;Record&lt;string, unknown&gt;&gt;;
+  lobbies: Array&lt;{
+    id: string;
+    eventId: string;
+    status: string;
+    createdAt: string;
+  }&gt;;
+  /** Co-op team seats the player holds or held. */
+  eventTeamSeats?: Array&lt;{
+    seatId: string;
+    eventTeamId: string;
+    eventWindowId: string;
+    status: string;
+    contribution: number;
+    counted: number;
+    joinedAt: string;
+    leftAt: string | null;
+  }&gt;;
+  /** Partner roll-ups (per window). */
+  eventTeamRollups?: Array&lt;{
+    id: string;
+    eventWindowId: string;
+    value: number;
+    milestonesGranted: string[];
+  }&gt;;
+}
+
+// ─── Ban / unban ───────────────────────────────────────────────────
+
+export interface BanPlayerInput {
+  /**
+   * Operator-supplied free-form reason. Recorded on the audit row
+   * and on the `player.banned` webhook payload.
+   */
+  reason: string;
+}
+
+export interface BanPlayerResult {
+  playerId: string;
+  externalPlayerId: string;
+  bannedAt: string;
+  reason: string;
+  /** `true` on first-time ban; `false` on a re-ban that just refreshed the reason. */
+  applied: boolean;
+}
+
+export interface UnbanPlayerResult {
+  playerId: string;
+  externalPlayerId: string;
+  unbannedAt: string;
+  /** `true` on first-time unban; `false` when the player wasn't banned to begin with. */
+  applied: boolean;
+}
+
+export interface MergePlayerResult {
+  fromPlayerId: string;
+  fromExternalPlayerId: string;
+  toPlayerId: string;
+  toExternalPlayerId: string;
+  /** `__merged_&lt;uuid&gt;__` placeholder the source row now carries. */
+  anonymizedExternalPlayerId: string | null;
+  counts: {
+    attemptsReassigned: number;
+    grantsReassigned: number;
+    itemsMerged: number;
+    itemLedgerRowsMoved: number;
+    walletsMerged: number;
+    walletLedgerRowsMoved: number;
+    lobbiesTouched: number;
+    leaderboardsScrubbed: number;
+    /** Co-op team seats re-pointed or folded into the survivor's. */
+    teamSeats?: number;
+  };
+  mergedAt: string;
+  /** `'merged'` on first call; `'no_op_already_merged'` on idempotent replay. */
+  status: 'merged' | 'no_op_already_merged';
+}
+
+// ─── Migration (bulk import) ───────────────────────────────────────
+
+/**
+ * One row in a `/server/v1/migrate/players` batch. `idempotencyKey`
+ * is typically the studio's stable player id so retries are safe.
+ */
+export interface MigratePlayerRow {
+  externalPlayerId: string;
+  /** Optional initial player-context snapshot (country, level, etc). */
+  contextSnapshot?: Record&lt;string, unknown&gt;;
+  idempotencyKey: string;
+}
+
+/** One row in a `/server/v1/migrate/wallet` batch. Positive amounts only. */
+export interface MigrateWalletRow {
+  externalPlayerId: string;
+  economyKey: string;
+  amount: number;
+  reason?: string;
+  idempotencyKey: string;
+}
+
+/** One row in a `/server/v1/migrate/inventory` batch. */
+export interface MigrateInventoryRow {
+  externalPlayerId: string;
+  itemKey: string;
+  quantity: number;
+  /** Free-form per-instance attributes carried over from the source platform. */
+  parameters?: Record&lt;string, unknown&gt;;
+  reason?: string;
+  idempotencyKey: string;
+}
+
+/** One row that didn't apply during a migration batch. */
+export interface MigrateFailure {
+  rowIndex: number;
+  externalPlayerId?: string;
+  error: { code: string; message: string };
+}
+
+/**
+ * Result of any `migrate.*` call. `applied` + `skipped` + `failed`
+ * sum to the batch size; `skipped` counts rows that were
+ * idempotent-replays (no double-apply).
+ */
+export interface MigrateOutcome {
+  applied: number;
+  skipped: number;
+  failed: number;
+  failures: MigrateFailure[];
+}
+
+// ─── Leaderboards (server-authoritative scoring) ───────────────────
+
+export interface SubmitScoreInput {
+  /**
+   * Segment / bucket selector. Semantics depend on the board's
+   * segmentation:
+   *
+   * - `context` boards: the bucket value to score into.
+   * - `progression` boards: omit, and the server derives the bucket from
+   *   the player's progression state.
+   * - `country` boards: omit — the server resolves it from the player's
+   *   stored country (server-authoritative; a submit can't score into
+   *   another country's board).
+   * - combined boards (multiple axes): omit — every axis is derived
+   *   server-side, so one `segment` value can't address them all.
+   * - unsegmented boards: ignored.
+   */
+  segment?: string;
+  /**
+   * Optional idempotency token. Replaying the same key with the same
+   * body is a no-op; a different body returns 409.
+   */
+  idempotencyKey?: string;
+}
+
+export interface SubmitScoreResult {
+  leaderboardId: string;
+  score: number;
+  /** `null` when the board can't rank this player (e.g. just-joined). */
+  rank: number | null;
+}
+
+// ─── Event progress (server-authoritative) ─────────────────────────
+
+export type AttemptStatus =
+  | 'in_progress'
+  | 'completed'
+  | 'expired'
+  | 'force_completed';
+
+/**
+ * One attempt row, mirroring the client SDK's `Attempt` shape so the
+ * same rendering code works against either surface.
+ */
+export interface Attempt {
+  id: string;
+  eventId: string;
+  eventWindowId: string;
+  leaderboardId: string;
+  playerId: string;
+  startedAt: string;
+  endsAt: string;
+  completedAt: string | null;
+  metrics: Record&lt;string, number&gt;;
+  metricsRaw: Record&lt;string, number&gt;;
+  score: number;
+  status: AttemptStatus;
+}
+
+export interface ReportProgressInput {
+  /** `'set'` writes the value as the new metric, while `'increment'` adds to the current. */
+  mode: 'set' | 'increment';
+  metricValue?: number;
+  metrics?: Record&lt;string, number&gt;;
+  /** Override server-side timestamp for replay scenarios. */
+  occurredAt?: string;
+  /** Auto-stamped by the SDK if omitted. */
+  idempotencyKey?: string;
+  /** Team events: which of the player's teams this progress counts for. */
+  eventTeamId?: string;
+}
+
+/**
+ * Milestone payouts that fired during a single `reportProgress` call.
+ * `key` identifies which milestone tripped; `grants` carries the
+ * concrete rewards the engine wrote (same shape `grants.create` returns).
+ */
+export interface MilestoneFired {
+  key: string;
+  grants: Grant[];
+}
+
+export interface ReportProgressResult {
+  attempt: Attempt;
+  /** Empty when nothing fired this update; never null. */
+  milestonesFired: MilestoneFired[];
+}
+
+/** Result of `events.finish()`: the finalized attempt + how it resolved. */
+export interface FinishAttemptResult {
+  attempt: Attempt;
+  /** `'completed'` (score-attack end / target met), or `'expired'` (ended early). */
+  outcome: 'completed' | 'expired';
+}
+
+// ─── Friends / social graph (read-only) ────────────────────────────
+
+/**
+ * Public identity envelope surfaced on friend / request / block rows:
+ * a player's display name plus optional avatar + ISO-3166 alpha-2
+ * country. Mirrors the client SDK's `PlayerIdentity`. `null` on a row
+ * whose subject has no resolvable identity.
+ */
+export interface PlayerIdentity {
+  name: string;
+  avatar?: string | null;
+  country?: string | null;
+}
+
+/**
+ * A confirmed friend, enriched with identity + live presence. Mirrors
+ * the OpenAPI `Friend` component and the client SDK's `Friend`.
+ * `online` / `lastActiveAt` / `status` come from the friend's
+ * heartbeat and are only fresh while they keep beating.
+ */
+export interface Friend {
+  externalPlayerId: string;
+  displayIdentity: PlayerIdentity | null;
+  /** ISO timestamp the friendship was established. */
+  friendsSince: string;
+  online: boolean;
+  /** ISO timestamp of their last heartbeat, or null when never/expired. */
+  lastActiveAt: string | null;
+  /** Free-form client-set status ("in_match", "lobby", …), or null. */
+  status: string | null;
+  /** ISO timestamp when the subject may gift this friend again. Absent ⇒
+   *  giftable now, or the game has gifting turned off. */
+  giftCooldownUntil?: string;
+}
+
+export type FriendRequestDirection = 'incoming' | 'outgoing';
+
+/** A pending friend request, incoming or outgoing. */
+export interface FriendRequest {
+  requestId: string;
+  direction: FriendRequestDirection;
+  player: { externalPlayerId: string; displayIdentity: PlayerIdentity | null };
+  createdAt: string;
+}
+
+export interface FriendRequests {
+  incoming: FriendRequest[];
+  outgoing: FriendRequest[];
+}
+
+/**
+ * What a gift moved. `'currency'` addresses `catalog.currencies`, which
+ * covers progression items (XP, trophies) as well as spendable currencies.
+ */
+export type GiftResourceType = 'item' | 'currency';
+
+export type GiftStatus = 'pending' | 'claimed' | 'expired' | 'failed';
+
+/**
+ * A gift between two players, from the inspected player's point of view.
+ * Mirrors the OpenAPI `Gift` component. Read-only from the server SDK: the
+ * send and claim actions live on the client SDK's `friends` client, because
+ * both are player-authenticated.
+ */
+export interface Gift {
+  giftId: string;
+  /** The grant delivering it; also ackable through `grants.ack`. */
+  grantId: string;
+  direction: 'incoming' | 'outgoing';
+  /** The other party: sender for incoming, recipient for outgoing. */
+  player: { externalPlayerId: string; displayIdentity: PlayerIdentity | null };
+  type: GiftResourceType;
+  resourceKey: string;
+  amount: number;
+  message: string | null;
+  /** Mirrors the delivering grant: `pending` until claimed. */
+  status: GiftStatus;
+  sentAt: string;
+  claimedAt: string | null;
+  expiresAt: string | null;
+}
+
+/** A player the subject has blocked. */
+export interface BlockedPlayer {
+  externalPlayerId: string;
+  displayIdentity: PlayerIdentity | null;
+  blockedAt: string;
+}
+
+// ─── Ping ──────────────────────────────────────────────────────────
+
+export interface ApiKeyInfo {
+  id: string;
+  prefix: string;
+  permissionSet: string;
+  environment: 'live' | 'test' | string;
+  studioId: string;
+  gameId: string | null;
+}
+
+export interface PingResponse {
+  ok: boolean;
+  apiKey: ApiKeyInfo;
+}
+
+// ─── Commerce: purchases + spend (docs/22) ─────────────────────────
+
+export type PurchaseStore =
+  | 'app_store'
+  | 'google_play'
+  | 'steam'
+  | 'epic'
+  | 'amazon'
+  | 'microsoft'
+  | 'playstation'
+  | 'nintendo'
+  | 'web'
+  | 'other';
+
+export type PurchaseProductType = 'consumable' | 'non_consumable' | 'subscription';
+
+export type PurchaseValidationStatus = 'unverified' | 'verified' | 'failed' | 'skipped';
+
+/**
+ * Input for `PurchasesClient.track`.
+ *
+ * Same shape the client SDK sends, plus `validationStatus`: a backend
+ * that verified the receipt with Apple/Google itself can say so, and
+ * the row lands `verified` instead of `unverified`. Client ingest never
+ * gets to declare its own receipt trustworthy.
+ */
+export interface TrackPurchaseInput {
+  /** The store's transaction id. Used for dedupe. */
+  transactionId: string;
+  store: PurchaseStore;
+  productId: string;
+  productType?: PurchaseProductType;
+  /** Minor units as charged: `499` is $4.99 in USD, ¥499 in JPY. */
+  amountMinor: number;
+  /** ISO 4217 alpha-3. */
+  currency: string;
+  receipt?: string;
+  /** ISO-8601. Defaults to the server's clock. */
+  purchasedAt?: string;
+  metadata?: Record&lt;string, unknown&gt;;
+  /** Assert a validation outcome your backend already established. */
+  validationStatus?: PurchaseValidationStatus;
+  /**
+   * The player offer (`instanceId` from the offers list) this purchase was
+   * made from. Required for the offer to be delivered; without it the SKU
+   * is attributed for revenue reporting only (docs/26).
+   */
+  offerInstanceId?: string;
+}
+
+/** The offer a purchase was attributed to (`TrackPurchaseResult.offer`, docs/26). */
+export interface PurchaseOfferResult {
+  offerId: string;
+  offerKey: string;
+  instanceId: string | null;
+  tier: number | null;
+  method: 'explicit' | 'inferred';
+  status: 'attributed' | 'pending_verification' | 'granted' | 'refused' | 'disputed' | 'failed';
+  state:
+    | 'available'
+    | 'shown'
+    | 'pending_verification'
+    | 'purchased'
+    | 'completed'
+    | 'dismissed'
+    | 'expired'
+    | 'holdout'
+    | null;
+  granted: boolean;
+  pendingVerification: boolean;
+  /** Your backend delivers `contents` (the offer's default). */
+  studioFulfils: boolean;
+  contents: Array&lt;Record&lt;string, unknown&gt;&gt; | null;
+  validationStatus: 'verified' | 'unverified' | 'skipped';
+  /** The A/B variant whose price and contents were sold; null for the base configuration. */
+  variantKey: string | null;
+}
+
+// ── Offers (docs/26) ──
+
+/** Instance state of an offer as the player sees it. */
+export type OfferState =
+  | 'available'
+  | 'shown'
+  | 'pending_verification'
+  | 'purchased'
+  | 'completed'
+  | 'dismissed'
+  | 'expired';
+
+/**
+ * `'paid'`: sold through the store. `'free'` (chain offers): claimed with
+ * `offers.claim`, never through a store.
+ */
+export type OfferTierType = 'paid' | 'free';
+
+/** One step of an offer: what to sell (or, when free, claim) now (`current`) or next (`next`). */
+export interface OfferTier {
+  index: number;
+  type: OfferTierType;
+  /** Null for a free tier. */
+  storeProductKey: string | null;
+  /** Store → SKU, e.g. `{ app_store: 'com.game.starter499' }`. `{}` for a free tier. */
+  skus: Record&lt;string, string&gt;;
+  /** Reference USD price in cents (display fallback; the store price is what the player pays). 0 for a free tier. */
+  referencePriceMinor: number;
+  /** The reward entries the tier contains, as configured. */
+  contents: Array&lt;Record&lt;string, unknown&gt;&gt;;
+  label: string | Record&lt;string, string&gt; | null;
+  valueLabel: string | null;
+}
+
+/**
+ * One offer instance for a player (`GET /server/v1/players/:externalId/offers`),
+ * the same shape the client SDK lists. Pass `instanceId` as
+ * `offerInstanceId` to `purchases.track` when the player buys it.
+ */
+export interface Offer {
+  instanceId: string;
+  offerKey: string;
+  kind: string;
+  name: string | Record&lt;string, string&gt;;
+  description: string | Record&lt;string, string&gt; | null;
+  state: OfferState;
+  tier: number;
+  tierCount: number;
+  current: OfferTier;
+  /** Chain offers: the next, still locked tier (a preview); null otherwise. */
+  next: OfferTier | null;
+  /** Server-anchored close time (ISO); the backstop before the first impression. */
+  expiresAt: string | null;
+  /** Chain offers: when the current tier's timer runs out. */
+  tierExpiresAt: string | null;
+  /** The offer closes when the player's session ends. */
+  endsWithSession: boolean;
+  purchasesRemaining: number | null;
+  presentation: { layout?: string; badge?: string; artKey?: string };
+  /**
+   * The A/B variant this player sees (`current`, `next` and `presentation`
+   * already reflect it), for your analytics; null for the base configuration.
+   */
+  variantKey: string | null;
+  /**
+   * The linked event's key when the offer is event-linked (a sale while it is
+   * live, or a post-event offer): show it on that event's screen. Else null.
+   */
+  linkedEventKey: string | null;
+}
+
+/**
+ * What `offers.trigger` reports happened in the game:
+ *  - `fail_event`: a fail (`key`, e.g. `level_failed`), with `consecutive`
+ *    fails in a row including this one (default 1). Revenge offers;
+ *  - `resource_depleted`: the player tried an action needing `required` of
+ *    `resource` (a currency or item key) and has `available`;
+ *    `secondsToRegen` is when a free refill arrives, if one does. Top-ups;
+ *  - `level_reached`: the player's level now.
+ */
+export type OfferTriggerInput =
+  | { type: 'fail_event'; key: string; consecutive?: number }
+  | {
+      type: 'resource_depleted';
+      resource: string;
+      required: number;
+      available: number;
+      secondsToRegen?: number;
+    }
+  | { type: 'level_reached'; level: number };
+
+/**
+ * One free chain tier claim. Exactly one of `granted` / `studioFulfils` is
+ * true: when Kraty granted, the contents arrive as a grant (`grant.created`);
+ * otherwise deliver `contents` yourself (also on the `offer.tier_claimed`
+ * webhook).
+ */
+export interface OfferClaim {
+  claimId: string;
+  offerId: string;
+  offerKey: string;
+  instanceId: string;
+  tier: number;
+  contents: Array&lt;Record&lt;string, unknown&gt;&gt;;
+  granted: boolean;
+  grantId: string | null;
+  studioFulfils: boolean;
+  claimedAt: string;
+  /** The A/B variant whose contents were claimed; null for the base configuration. */
+  variantKey: string | null;
+}
+
+/** Result of `offers.claim`: the claim and the offer after it. */
+export interface OfferClaimResult {
+  claim: OfferClaim;
+  /** The next tier is current with a fresh timer, or the state is `completed`. */
+  offer: Offer;
+}
+
+/** `details.reason` of a refused claim (`conflict` error). */
+export type OfferClaimRefusalReason = 'tier_changed' | 'tier_not_free' | 'offer_closed';
+
+/** Result of `offers.trigger`. */
+export interface OfferTriggerResult {
+  /** The offers this trigger armed that can be shown now; empty when none did. */
+  offers: Offer[];
+}
+
+export interface TrackPurchaseResult {
+  purchaseId: string;
+  transactionId: string;
+  store: PurchaseStore;
+  productId: string;
+  productType: PurchaseProductType | null;
+  amountMinor: number;
+  currency: string;
+  /** USD cents. */
+  normalizedAmountMinor: number;
+  normalizedCurrency: string;
+  fxRate: number;
+  validationStatus: PurchaseValidationStatus;
+  purchasedAt: string;
+  metadata: Record&lt;string, unknown&gt;;
+  /** True when this transaction id was already on file — a replay, not an error. */
+  deduplicated: boolean;
+  lifetimeAmountMinor: number;
+  purchaseCount: number;
+  /** The offer this purchase was attributed to, or null. Optional for older backends. */
+  offer?: PurchaseOfferResult | null;
+}
+
+/** One row of a player's purchase history. */
+export interface Purchase {
+  purchaseId: string;
+  playerId: string;
+  transactionId: string;
+  store: PurchaseStore;
+  productId: string;
+  productType: PurchaseProductType | null;
+  amountMinor: number;
+  currency: string;
+  normalizedAmountMinor: number;
+  normalizedCurrency: string;
+  fxRate: number;
+  validationStatus: PurchaseValidationStatus;
+  validatedAt: string | null;
+  purchasedAt: string;
+  metadata: Record&lt;string, unknown&gt;;
+  createdAt: string;
+}
+
+/**
+ * A player's spend profile. Every amount is USD cents, normalized at
+ * ingest, so thresholds mean the same thing across regions.
+ */
+export interface PlayerSpend {
+  playerId: string;
+  externalPlayerId: string;
+  /** USD cents, all time. */
+  lifetimeAmountMinor: number;
+  /** Always `'USD'`. */
+  currency: string;
+  purchaseCount: number;
+  firstPurchaseAt: string | null;
+  lastPurchaseAt: string | null;
+  /** Keyed by the day counts requested, e.g. `{ 7: 990, 30: 4980 }`. */
+  windows: Record&lt;number, number&gt;;
+}
+
+/** One entry in a `spend.queryPlayers` result. */
+export interface SpendingPlayer {
+  playerId: string;
+  externalPlayerId: string | null;
+  identity: { name: string; avatar?: string | null } | null;
+  /** The amount the filter matched on — windowed when `windowDays` was set. */
+  amountMinor: number;
+  currency: string;
+  purchaseCount: number;
+  lastPurchaseAt: string | null;
+}
+
+export interface SpendQueryResult {
+  players: SpendingPlayer[];
+  /** Total matching players, ignoring `limit`/`offset`. */
+  total: number;
+  minAmountMinor: number;
+  windowDays: number | null;
+  limit: number;
+  offset: number;
+}
+
+export interface ProductRevenue {
+  productId: string;
+  productType: PurchaseProductType | null;
+  amountMinor: number;
+  purchaseCount: number;
+}
+
+export interface RevenueDayPoint {
+  day: string;
+  amountMinor: number;
+  purchaseCount: number;
+}
+
+/** Game-level revenue rollup. All amounts USD cents. */
+export interface RevenueSummary {
+  currency: string;
+  from: string;
+  to: string;
+  grossAmountMinor: number;
+  purchaseCount: number;
+  payingPlayerCount: number;
+  /** Average revenue per paying user. Null when nobody paid. */
+  arppuMinor: number | null;
+  byProduct: ProductRevenue[];
+  byDay: RevenueDayPoint[];
+}
+
+/** Result of `players.markDebug` / `players.unmarkDebug` (docs/22). */
+export interface DebugPlayerResult {
+  playerId: string;
+  externalPlayerId: string;
+  /** ISO timestamp when flagged; null once unflagged. */
+  debugAt: string | null;
+  reason: string | null;
+  /** False on a replay that changed nothing. */
+  applied: boolean;
+}
+
+// ─── Co-op &amp; team events (studio-owned rosters) ────────────────────
+
+/** Body of `eventTeams.upsertRoster`: the full roster for one window. */
+export interface UpsertTeamRosterInput {
+  displayName: string;
+  badge?: string | null;
+  /** Studio data on the team, e.g. `{ regatta_league: 3 }`. */
+  attributes?: Record&lt;string, unknown&gt;;
+  /** Everyone on the team. Missing players leave; new ones are seated. */
+  externalPlayerIds: string[];
+  /** The window to act on (recommended). Default: the active window, else the next one. */
+  windowId?: string;
+  /** Auto-stamped by the SDK if omitted. */
+  idempotencyKey?: string;
+}
+
+export interface RemoveTeamMemberInput {
+  externalPlayerId: string;
+  /** `'kicked'` is final for the window and forfeits unpaid team rewards. */
+  reason: 'left' | 'kicked';
+  windowId?: string;
+  idempotencyKey?: string;
+}
+
+export interface EventTeamRosterMember {
+  seatId: string;
+  playerId: string;
+  externalPlayerId: string;
+  status: 'invited' | 'active' | 'left' | 'removed';
+  contribution: number;
+  counted: number;
+  /** In-team rank by counted contribution; null for seats that don't rank. */
+  rank: number | null;
+  locked: boolean;
+  joinedAt: string;
+  leftAt: string | null;
+}
+
+/** A team in one window, without its members. */
+export interface EventTeamSummary {
+  eventTeamId: string;
+  teamKey: string;
+  displayName: string;
+  badge: string | null;
+  attributes: Record&lt;string, unknown&gt;;
+  formation: string;
+  status: 'forming' | 'active' | 'closed';
+  score: number;
+  goalTarget: number | null;
+  completedAt: string | null;
+  memberCount: number;
+  closedAt: string | null;
+  finalRank: number | null;
+}
+
+/** A team in one window, with its members. `windowId` names the window acted on. */
+export interface EventTeam extends EventTeamSummary {
+  windowId: string;
+  members: EventTeamRosterMember[];
+}
+
+export interface EventTeamList {
+  windowId: string;
+  teams: EventTeamSummary[];
+  nextCursor: string | null;
+}
+
+// ── Guilds (docs/25) ───────────────────────────────────────────────────
+
+export type GuildRole = 'leader' | 'co_leader' | 'member';
+export type GuildJoinType = 'open' | 'request';
+
+export interface GuildPlayerRef {
+  externalPlayerId: string;
+  displayIdentity: PlayerIdentity | null;
+}
+
+export interface GuildMember {
+  externalPlayerId: string;
+  displayIdentity: PlayerIdentity | null;
+  role: GuildRole;
+  joinedAt: string;
+  /** Last time the platform saw the player (throttled). */
+  lastSeenAt: string | null;
+  online: boolean;
+  /** Donations this member made in this guild this guild week. */
+  weeklyHelps: number;
+}
+
+/** A guild in a list: profile plus environment and disband state. */
+export interface GuildAdminSummary {
+  guildId: string;
+  name: string;
+  description: string | null;
+  badge: string | null;
+  country: string | null;
+  joinType: GuildJoinType;
+  memberCount: number;
+  maxMembers: number;
+  metadata: Record&lt;string, unknown&gt;;
+  leader: GuildPlayerRef | null;
+  createdAt: string;
+  environment: 'live' | 'test';
+  disbandedAt: string | null;
+  disbandedReason: string | null;
+}
+
+export interface GuildPendingRequest {
+  requestId: string;
+  player: GuildPlayerRef | null;
+  message: string | null;
+  createdAt: string;
+}
+
+/** One stint of a player in a guild (membership history). */
+export interface GuildStint {
+  player: GuildPlayerRef | null;
+  role: string;
+  joinedVia: string;
+  joinedAt: string;
+  leftAt: string | null;
+  /** `left | kicked | removed | disbanded | erased | merged`. */
+  leftReason: string | null;
+}
+
+/** A guild with roster, pending requests and membership history. */
+export interface GuildAdminDetail {
+  guildId: string;
+  name: string;
+  description: string | null;
+  badge: string | null;
+  country: string | null;
+  joinType: GuildJoinType;
+  memberCount: number;
+  maxMembers: number;
+  metadata: Record&lt;string, unknown&gt;;
+  leader: GuildPlayerRef | null;
+  createdAt: string;
+  members: GuildMember[];
+  environment: 'live' | 'test';
+  disbandedAt: string | null;
+  disbandedReason: string | null;
+  pendingRequests: GuildPendingRequest[];
+  history: GuildStint[];
+}
+
+export interface PlayerGuildStint {
+  guildId: string;
+  role: string;
+  joinedVia: string;
+  joinedAt: string;
+  leftAt: string | null;
+  leftReason: string | null;
+}
+
+/** A player's current guild (or null) and their stints. */
+export interface PlayerGuild {
+  guild: GuildAdminDetail | null;
+  role: GuildRole | null;
+  history: PlayerGuildStint[];
+}
+
+export interface GuildProfilePatch {
+  name?: string;
+  description?: string | null;
+  badge?: string | null;
+  country?: string | null;
+  joinType?: GuildJoinType;
+  metadata?: Record&lt;string, unknown&gt;;
+}
+
+export interface GuildMemberRemoveResult {
+  /** The removed player was the last member. */
+  disbanded: boolean;
+  guild: GuildAdminDetail;
+}
+
+// ── Chat + player safety (docs/26) ─────────────────────────────────────
+
+export interface ChatPlayerRef {
+  externalPlayerId: string;
+  displayIdentity: { name: string; avatar?: string | null; country?: string | null } | null;
+}
+
+/** A message as operators see it: what was written AND the filtered copy; deleted ones included. */
+export interface OperatorChatMessage {
+  messageId: string;
+  conversationId: string;
+  conversationKind: string | null;
+  seq: number;
+  type: string;
+  senderKind: string;
+  sender: ChatPlayerRef | null;
+  text: string | null;
+  filteredText: string | null;
+  flagged: boolean;
+  customType: string | null;
+  payload: unknown;
+  createdAt: string;
+  deletedAt: string | null;
+  deletedBy: string | null;
+  editedAt: string | null;
+  editCount: number;
+  /** Earlier versions, oldest first. */
+  edits: Array&lt;{ text: string | null; filteredText: string | null; replacedAt: string }&gt;;
+}
+
+export interface OperatorChatParticipant {
+  externalPlayerId: string;
+  displayIdentity: ChatPlayerRef['displayIdentity'];
+  role: string;
+}
+
+export interface OperatorChatConversation {
+  conversationId: string;
+  kind: string;
+  environment: 'live' | 'test';
+  title: string | null;
+  key: string | null;
+  memberCount: number;
+  lastSeq: number;
+  lastMessageAt: string | null;
+  archivedAt: string | null;
+  createdAt: string;
+  participants: OperatorChatParticipant[];
+}
+
+/** Post as the game: text, a custom card, or both. */
+export interface ServerChatMessageInput {
+  text?: string | null;
+  customType?: string;
+  payload?: unknown;
+}
+
+export interface Restriction {
+  restrictionId: string;
+  kind: 'warning' | 'chat_mute' | 'chat_ban';
+  reason: string | null;
+  source: 'moderator' | 'auto' | 'server';
+  createdAt: string;
+  expiresAt: string | null;
+  liftedAt: string | null;
+  acknowledgedAt: string | null;
+  active: boolean;
+  reportId: string | null;
+}
+
+export interface RestrictionInput {
+  kind: 'warning' | 'chat_mute' | 'chat_ban';
+  /** Shown to the player. */
+  reason?: string | null;
+  /** Required for chat_mute; omitted = no expiry. */
+  durationHours?: number;
+}
+
+export interface ModerationPlayerRef {
+  playerId: string;
+  externalPlayerId: string;
+  environment: 'live' | 'test';
+  displayIdentity: ChatPlayerRef['displayIdentity'];
+  bannedAt: string | null;
+}
+
+export interface OperatorReport {
+  reportId: string;
+  status: 'open' | 'resolved' | 'dismissed';
+  category: string;
+  context: string;
+  comment: string | null;
+  reporter: ModerationPlayerRef | null;
+  target?: ModerationPlayerRef | null;
+  conversationId: string | null;
+  messageIds: string[];
+  guildId: string | null;
+  /** Snapshot at report time: the target's name, the messages with context, comments. */
+  evidence: Record&lt;string, unknown&gt;;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+  resolvedBy: Record&lt;string, unknown&gt; | null;
+  resolution: Record&lt;string, unknown&gt; | null;
+}
+
+export interface PlayerCase {
+  player: ModerationPlayerRef &amp; { firstSeenAt: string; lastSeenAt: string; bannedReason: string | null };
+  openReports: number;
+  reports: OperatorReport[];
+  restrictions: Restriction[];
+  recentMessages: OperatorChatMessage[];
+  reportsFiledLast30Days: number;
+}
+
+export type ModerationDecision = 'dismiss' | 'no_action' | 'warn' | 'mute' | 'chat_ban' | 'ban';
+
+export interface ModerationResolveInput {
+  decision: ModerationDecision;
+  /** Internal note on the reports. */
+  note?: string | null;
+  /** Shown to the player on warn / mute / chat_ban. */
+  reason?: string | null;
+  /** mute: required; chat_ban: omitted = indefinite. */
+  durationHours?: number;
+  deleteMessageIds?: string[];
+  /** Only these open reports (default: all of the player's open reports). */
+  reportIds?: string[];
+}
+
+export interface ResolveResult {
+  decision: ModerationDecision;
+  reportsClosed: number;
+  restriction: Restriction | null;
+  banned: boolean;
+  messagesDeleted: number;
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

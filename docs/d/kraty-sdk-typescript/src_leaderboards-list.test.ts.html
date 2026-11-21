@@ -1,0 +1,48 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-typescript/src/leaderboards-list.test.ts</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-typescript/src/leaderboards-list.test.ts</h1><p class=muted>kraty-sdk-typescript/src/leaderboards-list.test.ts</p><pre><code class="language-typescript">import { describe, expect, it, vi } from 'vitest';
+import { Kraty } from './index.js';
+
+/**
+ * LeaderboardsClient.list: `GET /sdk/v1/leaderboards` with `{ data }`
+ * unwrapping. Fake-fetch style mirrors friends.test.ts.
+ */
+
+function jsonRes(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+describe('LeaderboardsClient.list', () =&gt; {
+  it('GETs /sdk/v1/leaderboards and returns the unwrapped summaries', async () =&gt; {
+    const board = {
+      key: 'weekly_global',
+      name: 'Weekly',
+      description: null,
+      resetCadence: 'weekly',
+      nextResetAt: '2026-10-05T00:00:00.000Z',
+      acceptClientScores: true,
+      contextSegments: [],
+    };
+    const calls: Array&lt;{ url: string; method: string }&gt; = [];
+    const fetchImpl = vi.fn(async (url: string | URL, init?: RequestInit) =&gt; {
+      calls.push({ url: String(url), method: (init?.method ?? 'GET').toUpperCase() });
+      return jsonRes(200, { data: [board] });
+    }) as unknown as typeof fetch;
+
+    const kraty = new Kraty({
+      apiKey: 'pUUVdrM8.djr4-0Iv9h1JvVNSMZNDmSsSN7lSVq2F9dG6DG4A5uQ',
+      baseUrl: 'https://api.test.kraty.io',
+      fetch: fetchImpl,
+      retry: { attempts: 1, initialDelayMs: 1, maxDelayMs: 5, jitter: 0 },
+    });
+
+    const out = await kraty.leaderboards.list();
+
+    expect(out).toEqual([board]);
+    expect(calls).toEqual([{ url: 'https://api.test.kraty.io/sdk/v1/leaderboards', method: 'GET' }]);
+  });
+});
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

@@ -1,0 +1,1269 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-server-typescript/src/resources.ts</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-server-typescript/src/resources.ts</h1><p class=muted>kraty-sdk-server-typescript/src/resources.ts</p><pre><code class="language-typescript">import type { KratyServerClient } from './client.js';
+import type {
+  ModerationResolveInput,
+  OperatorChatConversation,
+  OperatorChatMessage,
+  OperatorReport,
+  PlayerCase,
+  ResolveResult,
+  Restriction,
+  RestrictionInput,
+  ServerChatMessageInput,
+  AckGrantInput,
+  AdjustItemInput,
+  AdjustItemResult,
+  AdjustWalletInput,
+  AdjustWalletResult,
+  BanPlayerInput,
+  BanPlayerResult,
+  BlockedPlayer,
+  CreateGrantInput,
+  MergePlayerResult,
+  DeletePlayerInput,
+  DeletePlayerResult,
+  Friend,
+  Gift,
+  FriendRequests,
+  Grant,
+  Lobby,
+  MigrateInventoryRow,
+  MigrateOutcome,
+  MigratePlayerRow,
+  MigrateWalletRow,
+  PingResponse,
+  PlayerExport,
+  PlayerSnapshot,
+  PushLobbyInput,
+  ReportProgressInput,
+  FinishAttemptResult,
+  ReportProgressResult,
+  SubmitScoreInput,
+  SubmitScoreResult,
+  UnbanPlayerResult,
+  DebugPlayerResult,
+  PlayerSpend,
+  Purchase,
+  RevenueSummary,
+  SpendQueryResult,
+  TrackPurchaseInput,
+  TrackPurchaseResult,
+  EventTeam,
+  EventTeamList,
+  RemoveTeamMemberInput,
+  UpsertTeamRosterInput,
+  GuildAdminDetail,
+  GuildAdminSummary,
+  GuildMemberRemoveResult,
+  GuildProfilePatch,
+  PlayerGuild,
+  Offer,
+  OfferClaimResult,
+  OfferTriggerInput,
+  OfferTriggerResult,
+} from './types.js';
+
+interface DataEnvelope&lt;T&gt; { data: T; }
+
+/**
+ * `/server/v1/players/:externalId/grants`: manual grant minting.
+ * Used for IAP fulfilment, make-goods, manual operator rewards, and
+ * any other server-issued payout.
+ */
+export class GrantsClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /**
+   * POST `/server/v1/players/:externalId/grants`: mint a new grant
+   * for the player.
+   *
+   * &lt;b&gt;Idempotency:&lt;/b&gt; always supply `idempotencyKey`. The SDK
+   * also generates one if you don't, but for server-side fulfilment
+   * the IAP receipt id is almost always what you want. Replaying the
+   * same key with the same body returns the original grant. Replaying
+   * with a DIFFERENT body returns 409 `idempotency_conflict` so a
+   * misconfigured retry can't silently mint duplicates.
+   *
+   * Reward grants land in the player's `pending-grants` queue,
+   * waiting for the client SDK's `claim` (or for your server-side
+   * `ack` call). Crate grants need `open` first to roll their
+   * contents.
+   */
+  async create(externalPlayerId: string, input: CreateGrantInput): Promise&lt;Grant&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;Grant&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/grants`,
+      input,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/server/v1/players/:externalId/grants/:grantId/ack`:
+   * server-side claim. Use this when your backend wants to flip a
+   * grant to `claimed` without the player's client SDK having to
+   * round-trip (e.g. consumable that's already applied server-side).
+   * Records `ackedBy='server_api'` on the audit row.
+   *
+   * Idempotent on `grantId`: re-acking returns the same row.
+   */
+  async ack(
+    externalPlayerId: string,
+    grantId: string,
+    input: AckGrantInput = {},
+  ): Promise&lt;Grant&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;Grant&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/grants/${encodeURIComponent(grantId)}/ack`,
+      input,
+    );
+    return env.data;
+  }
+}
+
+/**
+ * `/server/v1/players/:p/inventory(/...)`: server-side mint + revoke
+ * for items in the platform-managed inventory. Only meaningful when
+ * the game has `settings.inventoryManagement === 'platform'`.
+ */
+export class InventoryClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /**
+   * POST `/server/v1/players/:p/inventory/:itemKey/grant`:
+   * platform-managed inventory increment. Used for IAP item delivery,
+   * make-goods, or operator-issued items.
+   *
+   * Idempotency key is required for correctness: use the IAP
+   * receipt id. The SDK auto-stamps one if omitted but you almost
+   * always want to override.
+   */
+  async grant(
+    externalPlayerId: string,
+    itemKey: string,
+    input: AdjustItemInput,
+  ): Promise&lt;AdjustItemResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;AdjustItemResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/inventory/${encodeURIComponent(itemKey)}/grant`,
+      input,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/server/v1/players/:p/inventory/:itemKey/revoke`:
+   * platform-managed inventory decrement. Used for chargebacks,
+   * refunds, or admin corrections.
+   *
+   * 409 on insufficient quantity; the audit ledger never goes
+   * negative.
+   */
+  async revoke(
+    externalPlayerId: string,
+    itemKey: string,
+    input: AdjustItemInput,
+  ): Promise&lt;AdjustItemResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;AdjustItemResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/inventory/${encodeURIComponent(itemKey)}/revoke`,
+      input,
+    );
+    return env.data;
+  }
+}
+
+/**
+ * `/server/v1/players/:p/wallet(/...)`: server-side currency mint +
+ * burn. Counterpart to client SDK's `wallet.debit`: only the server
+ * surface can credit balance (mint money), which is why this SDK ships
+ * as a separate package from the client SDK.
+ */
+export class WalletClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /**
+   * POST `/server/v1/players/:p/wallet/:economyKey/credit`: atomic
+   * increment. Used for IAP currency fulfilment, support reissues,
+   * and tournament prize distribution.
+   *
+   * Idempotent on `idempotencyKey` (e.g. the IAP receipt). Replay
+   * with same body = no-op; replay with different body = 409.
+   */
+  async credit(
+    externalPlayerId: string,
+    economyKey: string,
+    input: AdjustWalletInput,
+  ): Promise&lt;AdjustWalletResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;AdjustWalletResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/wallet/${encodeURIComponent(economyKey)}/credit`,
+      input,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/server/v1/players/:p/wallet/:economyKey/debit`: atomic
+   * decrement. Used for refunds and admin corrections. 409 on
+   * insufficient balance.
+   *
+   * The client SDK can ALSO debit; this method exists for server-
+   * authoritative spends (your backend deducts before granting an
+   * item or unlocking content).
+   */
+  async debit(
+    externalPlayerId: string,
+    economyKey: string,
+    input: AdjustWalletInput,
+  ): Promise&lt;AdjustWalletResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;AdjustWalletResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/wallet/${encodeURIComponent(economyKey)}/debit`,
+      input,
+    );
+    return env.data;
+  }
+}
+
+/**
+ * `/server/v1/games/:gameId/...lobbies`: push externally-matched
+ * lobbies into Kraty. Use when your studio's own matchmaker (e.g.
+ * Steam, GameLift, Photon) already chose a roster of players and
+ * you want Kraty to host the event window + scoring for them.
+ */
+export class LobbiesClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /**
+   * POST `/server/v1/games/:gameId/events/:eventKey/lobbies`:
+   * create a lobby with a pre-matched roster. Idempotent on `key`.
+   *
+   * Requires the event's `leaderboardMode` to be `'lobby_matched'`.
+   * Returns 409 on mode mismatch.
+   */
+  async push(
+    gameId: string,
+    eventKey: string,
+    input: PushLobbyInput,
+  ): Promise&lt;Lobby&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;Lobby&gt;&gt;(
+      'POST',
+      `/server/v1/games/${encodeURIComponent(gameId)}/events/${encodeURIComponent(eventKey)}/lobbies`,
+      input,
+    );
+    return env.data;
+  }
+
+  /**
+   * GET `/server/v1/games/:gameId/lobbies/:lobbyId`: server-side
+   * lobby read. Wider field set than the client-side `lobbies.read`:
+   * exposes audit-relevant fields needed for support tooling.
+   */
+  async read(gameId: string, lobbyId: string): Promise&lt;Lobby&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;Lobby&gt;&gt;(
+      'GET',
+      `/server/v1/games/${encodeURIComponent(gameId)}/lobbies/${encodeURIComponent(lobbyId)}`,
+    );
+    return env.data;
+  }
+}
+
+/**
+ * `/server/v1/leaderboards/:key/score`: server-authoritative score
+ * submission. Unlike the client SDK's score path, this surface is NOT
+ * subject to the game's `acceptClientScores` gate: the `server_integration`
+ * key is trusted, so studios that keep scoring server-side (anti-cheat,
+ * simulation results) write here.
+ */
+export class LeaderboardsClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /**
+   * POST `/server/v1/leaderboards/:key/score`: submit a score for a
+   * player on a score-ranked board.
+   *
+   * &lt;b&gt;Segmentation:&lt;/b&gt; on `context` boards pass `opts.segment` as the
+   * bucket value; on `progression` boards omit it (the server derives
+   * the bucket from the player's progression state); on unsegmented
+   * boards it's ignored.
+   *
+   * Returns 404 (`KratyServerError` with `isNotFound`) for an unknown
+   * player or board, and 400 `score_not_supported` for progression-ranked
+   * boards (which don't accept raw scores; adjust the progression item
+   * instead).
+   */
+  async submitScore(
+    externalPlayerId: string,
+    key: string,
+    value: number,
+    opts: SubmitScoreInput = {},
+  ): Promise&lt;SubmitScoreResult&gt; {
+    const body: { externalPlayerId: string; value: number; segment?: string; idempotencyKey?: string } = {
+      externalPlayerId,
+      value,
+    };
+    if (opts.segment !== undefined) body.segment = opts.segment;
+    if (opts.idempotencyKey !== undefined) body.idempotencyKey = opts.idempotencyKey;
+    const env = await this.client.request&lt;DataEnvelope&lt;SubmitScoreResult&gt;&gt;(
+      'POST',
+      `/server/v1/leaderboards/${encodeURIComponent(key)}/score`,
+      body,
+    );
+    return env.data;
+  }
+}
+
+/**
+ * `/server/v1/players/:externalId/events/...`: server-authoritative
+ * event progress. Same shape as the client SDK's progress endpoint, but
+ * driven from your backend (trusted simulation, server-side match
+ * results) rather than the game client.
+ */
+export class EventsClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /**
+   * POST
+   * `/server/v1/players/:externalId/events/:eventKey/attempts/:attemptId/progress`:
+   * push a metric update onto an in-flight attempt.
+   *
+   * `mode: 'set'` writes the value as the new metric; `'increment'`
+   * adds to the current. Returns the updated attempt plus any
+   * milestones that fired (and the grants they wrote) this call.
+   */
+  async reportProgress(
+    externalPlayerId: string,
+    eventKey: string,
+    attemptId: string,
+    input: ReportProgressInput,
+  ): Promise&lt;ReportProgressResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;ReportProgressResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/events/${encodeURIComponent(eventKey)}/attempts/${encodeURIComponent(attemptId)}/progress`,
+      input,
+    );
+    return env.data;
+  }
+
+  /**
+   * Alias for {@link reportProgress}. The client SDK names this `progress`;
+   * the alias lets you keep the same verb when moving score submission to
+   * your server. `reportProgress` remains the canonical server-SDK name.
+   */
+  progress(
+    externalPlayerId: string,
+    eventKey: string,
+    attemptId: string,
+    input: ReportProgressInput,
+  ): Promise&lt;ReportProgressResult&gt; {
+    return this.reportProgress(externalPlayerId, eventKey, attemptId, input);
+  }
+
+  /**
+   * POST
+   * `/server/v1/players/:externalId/events/:eventKey/attempts/:attemptId/finish`:
+   * end an in-progress attempt now, finalizing with its current score
+   * (server-authoritative counterpart to the client SDK `events.finish`).
+   * `outcome` is `'completed'` (score-attack end / target met) or `'expired'`
+   * (a target event ended early).
+   */
+  async finish(
+    externalPlayerId: string,
+    eventKey: string,
+    attemptId: string,
+  ): Promise&lt;FinishAttemptResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;FinishAttemptResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/events/${encodeURIComponent(eventKey)}/attempts/${encodeURIComponent(attemptId)}/finish`,
+    );
+    return env.data;
+  }
+}
+
+/**
+ * `/server/v1/events/:eventKey/teams`: rosters for team events whose teams
+ * your studio owns (formation `external`, e.g. your clans or guilds). Send
+ * each window's roster; Kraty seats, scores and pays the teams. Rosters are
+ * per window: pass `windowId` (recommended) or target the active window.
+ */
+export class EventTeamsClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /**
+   * PUT `/server/v1/events/:eventKey/teams/:teamKey`: set the team's full
+   * roster for one window. All-or-nothing: a player locked to another team
+   * (409 `locked_elsewhere`), a full team (409 `team_full`) or a banned
+   * player (422 `player_banned`) refuses the whole call.
+   */
+  async upsertRoster(eventKey: string, teamKey: string, input: UpsertTeamRosterInput): Promise&lt;EventTeam&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;EventTeam&gt;&gt;(
+      'PUT',
+      `/server/v1/events/${encodeURIComponent(eventKey)}/teams/${encodeURIComponent(teamKey)}`,
+      input,
+    );
+    return env.data;
+  }
+
+  /** POST `/server/v1/events/:eventKey/teams/:teamKey/remove-member`. */
+  async removeMember(eventKey: string, teamKey: string, input: RemoveTeamMemberInput): Promise&lt;EventTeam&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;EventTeam&gt;&gt;(
+      'POST',
+      `/server/v1/events/${encodeURIComponent(eventKey)}/teams/${encodeURIComponent(teamKey)}/remove-member`,
+      input,
+    );
+    return env.data;
+  }
+
+  /** GET `/server/v1/events/:eventKey/teams/:teamKey`: one team with its members. */
+  async get(eventKey: string, teamKey: string, opts: { windowId?: string } = {}): Promise&lt;EventTeam&gt; {
+    const qs = opts.windowId ? `?windowId=${encodeURIComponent(opts.windowId)}` : '';
+    const env = await this.client.request&lt;DataEnvelope&lt;EventTeam&gt;&gt;(
+      'GET',
+      `/server/v1/events/${encodeURIComponent(eventKey)}/teams/${encodeURIComponent(teamKey)}${qs}`,
+    );
+    return env.data;
+  }
+
+  /** GET `/server/v1/events/:eventKey/teams`: a window's teams, paged by `cursor`. */
+  async list(
+    eventKey: string,
+    opts: { windowId?: string; cursor?: string; limit?: number } = {},
+  ): Promise&lt;EventTeamList&gt; {
+    const qs = new URLSearchParams();
+    if (opts.windowId) qs.set('windowId', opts.windowId);
+    if (opts.cursor) qs.set('cursor', opts.cursor);
+    if (opts.limit !== undefined) qs.set('limit', String(opts.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    const env = await this.client.request&lt;DataEnvelope&lt;EventTeamList&gt;&gt;(
+      'GET',
+      `/server/v1/events/${encodeURIComponent(eventKey)}/teams${suffix}`,
+    );
+    return env.data;
+  }
+}
+
+/**
+ * `/server/v1/players/:externalId`: unified player snapshot for
+ * support / admin tooling. Returns the player row plus their
+ * inventory, wallet, and recent grants in one call.
+ */
+/**
+ * Real-money purchases and spend queries (docs/22).
+ *
+ * This is the READ side of monetization. The client SDK can report a
+ * purchase but can never read a spend total; anything that answers
+ * "how much has this player spent" or "who are our whales" lives here,
+ * behind a `server_integration` key that stays on your backend.
+ *
+ * Every amount is USD cents (`normalizedAmountMinor`), converted at
+ * ingest from whatever the player was actually charged, so a threshold
+ * means the same thing to a player in São Paulo and one in Oslo.
+ */
+export class PurchasesClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /**
+   * POST `/server/v1/players/:externalId/purchases`: server-authoritative
+   * purchase ingest.
+   *
+   * Use this instead of the client SDK's `trackPurchase` when your
+   * backend validates receipts itself — pass `validationStatus:
+   * 'verified'` once Apple/Google confirms, and the row is marked
+   * trustworthy rather than sitting `unverified`.
+   *
+   * Idempotent on `transactionId`; a replay returns the original row
+   * with `deduplicated: true`.
+   *
+   * For a purchase made from an offer, pass the `offerInstanceId` from
+   * `offers.list` (or the client's list): only then is the offer delivered.
+   * The result's `offer` says what happened (`studioFulfils`: deliver
+   * `offer.contents` yourself).
+   */
+  async track(
+    externalPlayerId: string,
+    input: TrackPurchaseInput,
+  ): Promise&lt;TrackPurchaseResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;TrackPurchaseResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/purchases`,
+      input,
+    );
+    return env.data;
+  }
+
+  /**
+   * GET `/server/v1/players/:externalId/spend`: one player's spend
+   * profile.
+   *
+   * Pass `windows` to get rolling totals alongside the lifetime figure:
+   *
+   * ```ts
+   * const spend = await kraty.purchases.spendFor('player_42', [7, 30]);
+   * spend.lifetimeAmountMinor; // 12_450  ($124.50 all time)
+   * spend.windows[30];         // 2_990   ($29.90 in the last 30 days)
+   * ```
+   *
+   * Reads pre-aggregated totals, so it costs the same for a player with
+   * 900 purchases as for one with none.
+   */
+  async spendFor(
+    externalPlayerId: string,
+    windows: readonly number[] = [],
+  ): Promise&lt;PlayerSpend&gt; {
+    const query = windows.length &gt; 0 ? `?windows=${windows.join(',')}` : '';
+    const env = await this.client.request&lt;DataEnvelope&lt;PlayerSpend&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/spend${query}`,
+    );
+    return env.data;
+  }
+
+  /**
+   * GET `/server/v1/players/:externalId/purchases`: that player's
+   * purchase history, newest first.
+   */
+  async listForPlayer(
+    externalPlayerId: string,
+    opts: { limit?: number } = {},
+  ): Promise&lt;Purchase[]&gt; {
+    const query = opts.limit === undefined ? '' : `?limit=${opts.limit}`;
+    const env = await this.client.request&lt;
+      DataEnvelope&lt;{ purchases?: Purchase[] }&gt;
+    &gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/purchases${query}`,
+    );
+    return env.data?.purchases ?? [];
+  }
+
+  /**
+   * GET `/server/v1/spend/players`: every player at or above a spend
+   * threshold, biggest spender first.
+   *
+   * `minAmountMinor` is USD cents and the bound is INCLUSIVE, because
+   * "spent more than $50" in product conversations means "is a $50
+   * customer":
+   *
+   * ```ts
+   * // Everyone who has ever spent $50+
+   * const whales = await kraty.purchases.queryPlayers({ minAmountMinor: 5000 });
+   *
+   * // Everyone who spent $20+ in the last 30 days
+   * const active = await kraty.purchases.queryPlayers({
+   *   minAmountMinor: 2000,
+   *   windowDays: 30,
+   * });
+   * ```
+   */
+  async queryPlayers(opts: {
+    minAmountMinor: number;
+    /** Measure over the last N days instead of lifetime. */
+    windowDays?: number;
+    limit?: number;
+    offset?: number;
+  }): Promise&lt;SpendQueryResult&gt; {
+    const params = new URLSearchParams({
+      minAmountMinor: String(opts.minAmountMinor),
+    });
+    if (opts.windowDays !== undefined) params.set('windowDays', String(opts.windowDays));
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.offset !== undefined) params.set('offset', String(opts.offset));
+    const env = await this.client.request&lt;DataEnvelope&lt;SpendQueryResult&gt;&gt;(
+      'GET',
+      `/server/v1/spend/players?${params.toString()}`,
+    );
+    return env.data;
+  }
+
+  /**
+   * GET `/server/v1/spend/summary`: game-level revenue rollup for a
+   * date range — gross, purchase count, paying players, ARPPU, and
+   * per-product / per-day breakdowns. Defaults to the last 30 days.
+   */
+  async revenueSummary(
+    opts: { from?: string; to?: string } = {},
+  ): Promise&lt;RevenueSummary&gt; {
+    const params = new URLSearchParams();
+    if (opts.from) params.set('from', opts.from);
+    if (opts.to) params.set('to', opts.to);
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    const env = await this.client.request&lt;DataEnvelope&lt;RevenueSummary&gt;&gt;(
+      'GET',
+      `/server/v1/spend/summary${suffix}`,
+    );
+    return env.data;
+  }
+}
+
+export class PlayersClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  async get(externalPlayerId: string): Promise&lt;PlayerSnapshot&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;PlayerSnapshot&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}`,
+    );
+    return env.data;
+  }
+
+  /**
+   * PUT `/server/v1/players/:externalId/identity`: override the player's
+   * synthetic identity (display name + optional avatar). It's normally
+   * auto-generated from the game's pool on first contact; call this to set a
+   * custom one (e.g. the player's chosen handle) that shows on leaderboards
+   * and in the client SDK. The player must already be registered — 404
+   * (`KratyServerError` with `isNotFound`) otherwise.
+   */
+  async setIdentity(
+    externalPlayerId: string,
+    identity: { name: string; avatar?: string | null },
+  ): Promise&lt;{ name: string; avatar?: string }&gt; {
+    const env = await this.client.request&lt;
+      DataEnvelope&lt;{
+        externalPlayerId: string;
+        syntheticIdentity: { name: string; avatar?: string };
+      }&gt;
+    &gt;(
+      'PUT',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/identity`,
+      identity,
+    );
+    return env.data.syntheticIdentity;
+  }
+
+  /**
+   * POST `/server/v1/players/:externalId/delete`: GDPR Article 17
+   * right of erasure. Anonymizes the player row in place and
+   * cascades through attempts, lobbies, and the Redis leaderboard
+   * meta. The financial ledger (grants, item / wallet ledgers) is
+   * retained per audit requirements but its FK now points at an
+   * anonymized row.
+   *
+   * Emits one final `player.deleted` webhook with the original
+   * external id so your backend can mirror the deletion. Idempotent:
+   * replays return `status: 'no_op_*'`, and erasure for a
+   * never-existed player succeeds with `status: 'no_op_never_existed'`
+   * (GDPR semantics: there was no data to erase).
+   */
+  async delete(
+    externalPlayerId: string,
+    input: DeletePlayerInput = {},
+  ): Promise&lt;DeletePlayerResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;DeletePlayerResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/delete`,
+      input,
+    );
+    return env.data;
+  }
+
+  /**
+   * GET `/server/v1/players/:externalId/export`: GDPR Article 15
+   * right of access. Returns the full machine-readable bundle of
+   * everything Kraty stores about the player (profile, attempts,
+   * grants, inventory, wallet, lobbies). Each list is hard-capped
+   * at 1,000 rows.
+   *
+   * Returns 404 (`KratyServerError` with `isNotFound`) when the
+   * player is unknown to Kraty.
+   */
+  async export(externalPlayerId: string): Promise&lt;PlayerExport&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;PlayerExport&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/export`,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/server/v1/players/:externalId/ban`: soft-ban a player.
+   * Gates future SDK writes (events.start / progress / claim /
+   * open / debit / consume / register all return 403
+   * `player_banned`) without touching existing scores or grants.
+   *
+   * Typical use case: studio's own anti-cheat pipeline detects an
+   * anomaly and bans the player automatically. The actor is
+   * recorded as `api_key:&lt;prefix&gt;` on the audit row.
+   *
+   * Idempotent: re-banning refreshes the reason and updates the
+   * audit but doesn't re-fire the webhook.
+   */
+  async ban(
+    externalPlayerId: string,
+    input: BanPlayerInput,
+  ): Promise&lt;BanPlayerResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;BanPlayerResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/ban`,
+      input,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/server/v1/players/:externalId/debug`: flag an internal / QA
+   * / influencer account so it stops counting toward revenue.
+   *
+   * Use this for your own staff accounts. `environment: 'test'` already
+   * isolates sandbox players, but staff who play the LIVE build make
+   * real store transactions and can only be excluded this way.
+   *
+   * Call it at account-creation time from your backend rather than
+   * remembering to click through the dashboard:
+   *
+   * ```ts
+   * if (isStaffEmail(email)) {
+   *   await kraty.players.markDebug(externalId, { reason: 'staff account' });
+   * }
+   * ```
+   *
+   * **Retroactive**: past purchases leave reporting too. Their own
+   * spend total keeps updating, so `spend_at_least` gates still work
+   * for them — which is the point of a QA account. Idempotent.
+   */
+  async markDebug(
+    externalPlayerId: string,
+    input: { reason?: string } = {},
+  ): Promise&lt;DebugPlayerResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;DebugPlayerResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/debug`,
+      input,
+    );
+    return env.data;
+  }
+
+  /**
+   * DELETE `/server/v1/players/:externalId/debug`: unflag. The
+   * player's purchases re-enter revenue reporting, retroactively.
+   */
+  async unmarkDebug(externalPlayerId: string): Promise&lt;DebugPlayerResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;DebugPlayerResult&gt;&gt;(
+      'DELETE',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/debug`,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/server/v1/players/:fromExternalId/merge-into/:toExternalId`:
+   * fold the source player's record into the target. Reassigns
+   * attempts, grants, item + wallet ledgers; sums balances on key
+   * collision (the target's quantity + the source's quantity);
+   * dedupes lobby memberships; rewrites the source row to a
+   * `__merged_&lt;uuid&gt;__` placeholder so the original external id is
+   * available for re-registration.
+   *
+   * Typical use: guest player on a fresh device finishes onboarding,
+   * signs in via OAuth, and the studio backend folds the guest
+   * record into the authenticated player.
+   *
+   * Idempotent: replaying with the same `fromExternalPlayerId`
+   * after the merge returns `{ status: 'no_op_already_merged' }`
+   * with the existing target. Throws `KratyServerError` with
+   * `code='not_found'` on missing players and `code='conflict'`
+   * (422) on invalid merges (same player, or the target is banned
+   * / deleted).
+   */
+  async merge(
+    fromExternalPlayerId: string,
+    toExternalPlayerId: string,
+  ): Promise&lt;MergePlayerResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;MergePlayerResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(fromExternalPlayerId)}/merge-into/${encodeURIComponent(toExternalPlayerId)}`,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/server/v1/players/:externalId/unban`: lift a soft-ban.
+   * Symmetric to {@link ban}. The player can resume SDK writes
+   * immediately. Idempotent: unbanning a non-banned player is a
+   * no-op with `applied: false`.
+   */
+  async unban(externalPlayerId: string): Promise&lt;UnbanPlayerResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;UnbanPlayerResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/unban`,
+    );
+    return env.data;
+  }
+
+  /**
+   * GET `/server/v1/players/:externalId/friends`: read ANY player's
+   * accepted friends, each enriched with display identity and live
+   * presence (online / last-active / status). Read-only support /
+   * moderation surface — the player's own add/accept/block actions live
+   * on the client SDK's `friends` client. Returns 404
+   * (`KratyServerError` with `isNotFound`) when the player is unknown.
+   */
+  async friends(externalPlayerId: string): Promise&lt;Friend[]&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;{ friends: Friend[] }&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/friends`,
+    );
+    return env.data.friends;
+  }
+
+  /**
+   * GET `/server/v1/players/:externalId/friends/requests`: the player's
+   * pending incoming + outgoing friend requests. Read-only. Returns 404
+   * (`KratyServerError` with `isNotFound`) when the player is unknown.
+   */
+  async friendRequests(externalPlayerId: string): Promise&lt;FriendRequests&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;FriendRequests&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/friends/requests`,
+    );
+    return env.data;
+  }
+
+  /**
+   * GET `/server/v1/players/:externalId/blocks`: the players this
+   * player has blocked. Read-only. Returns 404 (`KratyServerError` with
+   * `isNotFound`) when the player is unknown.
+   */
+  async blocks(externalPlayerId: string): Promise&lt;BlockedPlayer[]&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;{ blocked: BlockedPlayer[] }&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/blocks`,
+    );
+    return env.data.blocked;
+  }
+
+  /**
+   * GET `/server/v1/players/:externalId/gifts`: the gifts this player
+   * received (the default) or sent, each with the counterparty's identity
+   * and the delivering grant's status.
+   *
+   * A support surface for "where did my gift go" — the push equivalents are
+   * the `gift.sent` / `gift.claimed` webhooks. Sending and claiming are
+   * player-authenticated and live on the client SDK. Throws
+   * `gifting_disabled` when the game never enabled gifting, and 404
+   * (`KratyServerError` with `isNotFound`) when the player is unknown.
+   */
+  async gifts(
+    externalPlayerId: string,
+    opts: { direction?: 'received' | 'sent'; limit?: number } = {},
+  ): Promise&lt;Gift[]&gt; {
+    const params = new URLSearchParams();
+    if (opts.direction) params.set('direction', opts.direction);
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    const query = params.toString();
+    const env = await this.client.request&lt;DataEnvelope&lt;{ gifts: Gift[] }&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/gifts${query ? `?${query}` : ''}`,
+    );
+    return env.data.gifts;
+  }
+}
+
+/**
+ * `/server/v1/migrate/*`: bulk-import endpoints for studios moving
+ * existing players, wallets, and inventory into Kraty from another
+ * platform.
+ *
+ * Each method accepts up to 1,000 rows per call. Every row carries
+ * its own `idempotencyKey` (typically the studio's stable id for
+ * that player / wallet entry / inventory holding) so retries are
+ * safe at the row level. Bad rows are captured in
+ * `MigrateOutcome.failures`; the rest of the batch still applies.
+ *
+ * Studios with larger datasets loop client-side:
+ *
+ * ```ts
+ * for (const chunk of chunked(allPlayers, 1000)) {
+ *   const out = await kraty.migrate.players(chunk);
+ *   if (out.failed &gt; 0) collectForRetry(out.failures);
+ * }
+ * ```
+ *
+ * Webhooks are NOT emitted during migration; a 100k-player import
+ * would otherwise flood the studio's own backend with
+ * `player.registered` / `inventory.changed` / `wallet.changed`
+ * deliveries. Studios that want onboarding-side-effects can run them
+ * via the regular routes after migration completes.
+ */
+/**
+ * `/server/v1/guilds*`: guild reads, the server-authoritative weekly guild
+ * score, and studio-side moderation (docs/25). Pinned to the key's
+ * environment: a guild of the other environment is a 404. Every write is
+ * audited (`actorKind: api_key`) and fires the matching `guild.*` webhook.
+ */
+export class GuildsClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /** GET `/guilds`: newest first; `q` matches names, `player` finds a player's guilds (past ones too). */
+  async list(
+    opts: { q?: string; player?: string; includeDisbanded?: boolean; limit?: number; offset?: number } = {},
+  ): Promise&lt;{ guilds: GuildAdminSummary[]; total: number }&gt; {
+    const params = new URLSearchParams();
+    if (opts.q) params.set('q', opts.q);
+    if (opts.player) params.set('player', opts.player);
+    if (opts.includeDisbanded) params.set('includeDisbanded', 'true');
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.offset !== undefined) params.set('offset', String(opts.offset));
+    const qs = params.toString();
+    const env = await this.client.request&lt;DataEnvelope&lt;{ guilds: GuildAdminSummary[]; total: number }&gt;&gt;(
+      'GET',
+      `/server/v1/guilds${qs ? `?${qs}` : ''}`,
+    );
+    return env.data;
+  }
+
+  /** GET `/guilds/:guildId`: roster, pending requests, membership history. */
+  async get(guildId: string): Promise&lt;GuildAdminDetail&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;GuildAdminDetail&gt;&gt;(
+      'GET',
+      `/server/v1/guilds/${encodeURIComponent(guildId)}`,
+    );
+    return env.data;
+  }
+
+  /** GET `/players/:externalId/guild`: the player's current guild (or null) and stints. */
+  async forPlayer(externalPlayerId: string): Promise&lt;PlayerGuild&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;PlayerGuild&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/guild`,
+    );
+    return env.data;
+  }
+
+  /** PATCH `/guilds/:guildId`: moderate the profile (bypasses the name filter). */
+  async update(guildId: string, patch: GuildProfilePatch): Promise&lt;GuildAdminDetail&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;GuildAdminDetail&gt;&gt;(
+      'PATCH',
+      `/server/v1/guilds/${encodeURIComponent(guildId)}`,
+      patch,
+    );
+    return env.data;
+  }
+
+  /** POST `/guilds/:guildId/members/:externalId/remove`: no rejoin block (unlike a kick). */
+  async removeMember(guildId: string, externalPlayerId: string): Promise&lt;GuildMemberRemoveResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;GuildMemberRemoveResult&gt;&gt;(
+      'POST',
+      `/server/v1/guilds/${encodeURIComponent(guildId)}/members/${encodeURIComponent(externalPlayerId)}/remove`,
+    );
+    return env.data;
+  }
+
+  /** POST `/guilds/:guildId/leader`: set the leader; the old one becomes a co-leader. */
+  async setLeader(guildId: string, externalPlayerId: string): Promise&lt;GuildAdminDetail&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;GuildAdminDetail&gt;&gt;(
+      'POST',
+      `/server/v1/guilds/${encodeURIComponent(guildId)}/leader`,
+      { externalPlayerId },
+    );
+    return env.data;
+  }
+
+  /** POST `/guilds/:guildId/disband`: every member leaves, then the guild closes. Irreversible. */
+  async disband(guildId: string): Promise&lt;GuildAdminDetail&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;GuildAdminDetail&gt;&gt;(
+      'POST',
+      `/server/v1/guilds/${encodeURIComponent(guildId)}/disband`,
+    );
+    return env.data;
+  }
+}
+
+/**
+ * `/server/v1/players/:externalId/offers` (docs/26): real-money offers for
+ * server-driven storefronts, and authoritative trigger reports.
+ *
+ * Your backend is the verified door for an offer purchase: report it with
+ * `purchases.track(externalPlayerId, { …, validationStatus: 'verified',
+ * offerInstanceId: offer.instanceId })`. Without `offerInstanceId` the offer
+ * isn't delivered; the purchase only counts as that offer's revenue. When the
+ * result's `offer.studioFulfils` is true (the offer is set to game delivers; by default Kraty delivers, so do not grant it too), deliver
+ * `offer.contents` yourself, or from the `offer.purchase_verified` webhook.
+ */
+export class OffersClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /**
+   * GET `/players/:externalId/offers`: the offers the player can be shown
+   * now, highest priority first (`limit` ≤ 20, default 10). `level` is the
+   * player's current level, for offers that trigger on reaching one. Arms
+   * missing `always` / `level_reached` cycles, like the client list; it
+   * records no impression.
+   */
+  async list(externalPlayerId: string, opts: { limit?: number; level?: number } = {}): Promise&lt;Offer[]&gt; {
+    const params = new URLSearchParams();
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.level !== undefined) params.set('level', String(opts.level));
+    const qs = params.toString();
+    const env = await this.client.request&lt;DataEnvelope&lt;Offer[]&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/offers${qs ? `?${qs}` : ''}`,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/players/:externalId/offers/triggers`: report a fail, a depleted
+   * resource or a level authoritatively, so the offers listening to it arm.
+   * Answers the newly armed offers that can be shown now (`offers: []` when
+   * none did). Idempotent on `idempotencyKey` (stamped when omitted).
+   * `playerContext` feeds offer eligibility.
+   */
+  async trigger(
+    externalPlayerId: string,
+    input: OfferTriggerInput,
+    opts: { playerContext?: Record&lt;string, unknown&gt;; idempotencyKey?: string } = {},
+  ): Promise&lt;OfferTriggerResult&gt; {
+    const body: Record&lt;string, unknown&gt; = { trigger: input };
+    if (opts.playerContext !== undefined) body['playerContext'] = opts.playerContext;
+    if (opts.idempotencyKey) body['idempotencyKey'] = opts.idempotencyKey;
+    const env = await this.client.request&lt;DataEnvelope&lt;OfferTriggerResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/offers/triggers`,
+      body,
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/players/:externalId/offers/:instanceId/claim`: claim the current
+   * free tier of a chain offer (`offer.current.type === 'free'`), for
+   * server-driven storefronts. Pass the `tier` the player tapped
+   * (`offer.tier`). No store, never revenue. When `claim.studioFulfils` is
+   * true (the offer is set to game delivers; by default Kraty delivers, so do not grant it too) deliver `claim.contents` yourself. Deliver each
+   * claim from one path only (this response or the `offer.tier_claimed`
+   * webhook), and de-duplicate on `claim.claimId`. Idempotent on
+   * `idempotencyKey` (stamped when omitted). A refusal throws a `conflict`
+   * error with `details.reason` (`tier_changed`, `tier_not_free`,
+   * `offer_closed`) and `details.offer`, the offer now.
+   */
+  async claim(
+    externalPlayerId: string,
+    instanceId: string,
+    opts: { tier: number; idempotencyKey?: string },
+  ): Promise&lt;OfferClaimResult&gt; {
+    const body: Record&lt;string, unknown&gt; = { tier: opts.tier };
+    if (opts.idempotencyKey) body['idempotencyKey'] = opts.idempotencyKey;
+    const env = await this.client.request&lt;DataEnvelope&lt;OfferClaimResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/offers/${encodeURIComponent(instanceId)}/claim`,
+      body,
+    );
+    return env.data;
+  }
+}
+
+export class MigrateClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /**
+   * POST `/server/v1/migrate/players`: bulk-import players from
+   * another platform. Each row's `idempotencyKey` is typically the
+   * studio's stable player id; replays return the same player
+   * without applying twice.
+   */
+  async players(rows: MigratePlayerRow[]): Promise&lt;MigrateOutcome&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;MigrateOutcome&gt;&gt;(
+      'POST',
+      '/server/v1/migrate/players',
+      { rows },
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/server/v1/migrate/wallet`: bulk-credit wallet balances.
+   * Players are auto-upserted on first contact so the wallet import
+   * doesn't need the players import to have run first.
+   */
+  async wallet(rows: MigrateWalletRow[]): Promise&lt;MigrateOutcome&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;MigrateOutcome&gt;&gt;(
+      'POST',
+      '/server/v1/migrate/wallet',
+      { rows },
+    );
+    return env.data;
+  }
+
+  /**
+   * POST `/server/v1/migrate/inventory`: bulk-grant inventory rows.
+   * `parameters` lets you carry forward per-instance attributes from
+   * the source platform (e.g. a granted potion's roll stats).
+   */
+  async inventory(rows: MigrateInventoryRow[]): Promise&lt;MigrateOutcome&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;MigrateOutcome&gt;&gt;(
+      'POST',
+      '/server/v1/migrate/inventory',
+      { rows },
+    );
+    return env.data;
+  }
+}
+
+/**
+ * `/server/v1/ping`: connectivity + key-info echo. Useful for
+ * deploy-time smoke tests ("is the env var wired to the right key?").
+ */
+export class HealthClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  async ping(): Promise&lt;PingResponse&gt; {
+    return await this.client.request&lt;PingResponse&gt;('GET', '/server/v1/ping');
+  }
+}
+
+/**
+ * `/server/v1/chat*` (docs/26): read conversations (original and filtered
+ * text, deleted messages included), post as the game, delete messages.
+ * Pinned to the key's environment.
+ */
+export class ChatClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /** GET `/players/:externalId/chat/conversations`: the conversations a player is (or was) in. */
+  async conversationsFor(
+    externalPlayerId: string,
+    opts: { kind?: string; limit?: number; offset?: number } = {},
+  ): Promise&lt;{ conversations: OperatorChatConversation[]; nextOffset: number | null }&gt; {
+    const params = new URLSearchParams();
+    if (opts.kind) params.set('kind', opts.kind);
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.offset !== undefined) params.set('offset', String(opts.offset));
+    const qs = params.toString();
+    const env = await this.client.request&lt;DataEnvelope&lt;{ conversations: OperatorChatConversation[]; nextOffset: number | null }&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/chat/conversations${qs ? `?${qs}` : ''}`,
+    );
+    return env.data;
+  }
+
+  /** GET `/chat/conversations/:id`. */
+  async conversation(conversationId: string): Promise&lt;OperatorChatConversation&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;OperatorChatConversation&gt;&gt;(
+      'GET',
+      `/server/v1/chat/conversations/${encodeURIComponent(conversationId)}`,
+    );
+    return env.data;
+  }
+
+  /** GET `/chat/conversations/:id/messages`: oldest to newest; `before` / `after` are seq cursors. */
+  async messages(
+    conversationId: string,
+    opts: { before?: number; after?: number; limit?: number } = {},
+  ): Promise&lt;{ messages: OperatorChatMessage[]; hasMore: boolean }&gt; {
+    const params = new URLSearchParams();
+    if (opts.before !== undefined) params.set('before', String(opts.before));
+    if (opts.after !== undefined) params.set('after', String(opts.after));
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    const env = await this.client.request&lt;DataEnvelope&lt;{ messages: OperatorChatMessage[]; hasMore: boolean }&gt;&gt;(
+      'GET',
+      `/server/v1/chat/conversations/${encodeURIComponent(conversationId)}/messages${qs ? `?${qs}` : ''}`,
+    );
+    return env.data;
+  }
+
+  /** POST `/chat/conversations/:id/messages`: post as the game (`sender.kind: server`). */
+  async post(conversationId: string, message: ServerChatMessageInput): Promise&lt;OperatorChatMessage&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;OperatorChatMessage&gt;&gt;(
+      'POST',
+      `/server/v1/chat/conversations/${encodeURIComponent(conversationId)}/messages`,
+      message,
+    );
+    return env.data;
+  }
+
+  /** POST `/chat/channels/:key/messages`: an announcement in a public channel. */
+  async announce(channelKey: string, message: ServerChatMessageInput): Promise&lt;OperatorChatMessage&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;OperatorChatMessage&gt;&gt;(
+      'POST',
+      `/server/v1/chat/channels/${encodeURIComponent(channelKey)}/messages`,
+      message,
+    );
+    return env.data;
+  }
+
+  /** DELETE `/chat/messages/:id`: delete any message (audited, fires `chat.message_deleted`). */
+  async deleteMessage(messageId: string): Promise&lt;{ messageId: string; deleted: boolean }&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;{ messageId: string; deleted: boolean }&gt;&gt;(
+      'DELETE',
+      `/server/v1/chat/messages/${encodeURIComponent(messageId)}`,
+    );
+    return env.data;
+  }
+}
+
+/**
+ * `/server/v1/moderation*` + player restrictions (docs/26): work the
+ * report queue from your own tooling, restrict players, review decisions.
+ * Works in every game, chat or not.
+ */
+export class ModerationClient {
+  constructor(private readonly client: KratyServerClient) {}
+
+  /** GET `/moderation/reports`: newest first, optionally by status. */
+  async reports(
+    opts: { status?: 'open' | 'resolved' | 'dismissed'; limit?: number; offset?: number } = {},
+  ): Promise&lt;OperatorReport[]&gt; {
+    const params = new URLSearchParams();
+    if (opts.status) params.set('status', opts.status);
+    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+    if (opts.offset !== undefined) params.set('offset', String(opts.offset));
+    const qs = params.toString();
+    const env = await this.client.request&lt;DataEnvelope&lt;{ reports: OperatorReport[] }&gt;&gt;(
+      'GET',
+      `/server/v1/moderation/reports${qs ? `?${qs}` : ''}`,
+    );
+    return env.data.reports;
+  }
+
+  /** GET `/players/:externalId/moderation`: reports with evidence, restrictions, recent messages. */
+  async playerCase(externalPlayerId: string): Promise&lt;PlayerCase&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;PlayerCase&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/moderation`,
+    );
+    return env.data;
+  }
+
+  /** POST `/players/:externalId/moderation/resolve`: decide on the player's open reports. */
+  async resolve(externalPlayerId: string, input: ModerationResolveInput): Promise&lt;ResolveResult&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;ResolveResult&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/moderation/resolve`,
+      input,
+    );
+    return env.data;
+  }
+
+  /** GET `/players/:externalId/restrictions`: the player's restriction history. */
+  async restrictions(externalPlayerId: string): Promise&lt;Restriction[]&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;{ restrictions: Restriction[] }&gt;&gt;(
+      'GET',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/restrictions`,
+    );
+    return env.data.restrictions;
+  }
+
+  /** POST `/players/:externalId/restrictions`: warn, mute or chat-ban (replaces one of the same kind). */
+  async restrict(externalPlayerId: string, input: RestrictionInput): Promise&lt;Restriction&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;Restriction&gt;&gt;(
+      'POST',
+      `/server/v1/players/${encodeURIComponent(externalPlayerId)}/restrictions`,
+      input,
+    );
+    return env.data;
+  }
+
+  /** POST `/restrictions/:id/lift`. */
+  async lift(restrictionId: string): Promise&lt;Restriction&gt; {
+    const env = await this.client.request&lt;DataEnvelope&lt;Restriction&gt;&gt;(
+      'POST',
+      `/server/v1/restrictions/${encodeURIComponent(restrictionId)}/lift`,
+    );
+    return env.data;
+  }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

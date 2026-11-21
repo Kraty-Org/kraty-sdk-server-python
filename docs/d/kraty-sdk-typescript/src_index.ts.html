@@ -1,0 +1,593 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-typescript/src/index.ts</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-typescript/src/index.ts</h1><p class=muted>kraty-sdk-typescript/src/index.ts</p><pre><code class="language-typescript">import { KratyClient, type KratyClientOptions } from './client.js';
+import { KratyApiError } from './errors.js';
+import {
+  CatalogClient,
+  ChatClient,
+  DailyLoginClient,
+  EventLeaderboardsClient,
+  EventsClient,
+  FriendsClient,
+  GrantsClient,
+  GuildsClient,
+  InventoryClient,
+  LeaderboardsClient,
+  LobbiesClient,
+  OffersClient,
+  ModerationClient,
+  PlayersClient,
+  PurchasesClient,
+  WalletClient,
+  pollLobbyUntilActive,
+  pollPendingGrants,
+} from './resources.js';
+import type { SecretStore } from './secret-store.js';
+import type { TrackPurchaseInput, TrackPurchaseResult } from './types.js';
+
+export { KratyClient } from './client.js';
+export type { KratyClientOptions, RetryConfig, RequestInfo, ServerTime } from './client.js';
+export {
+  CatalogClient,
+  ChatClient,
+  DailyLoginClient,
+  EventLeaderboardsClient,
+  EventsClient,
+  FriendsClient,
+  GrantsClient,
+  GuildsClient,
+  InventoryClient,
+  LeaderboardsClient,
+  LobbiesClient,
+  OffersClient,
+  ModerationClient,
+  PlayersClient,
+  PurchasesClient,
+  WalletClient,
+  canonicalTransactionId,
+  pollLobbyUntilActive,
+  pollPendingGrants,
+} from './resources.js';
+export type {
+  CollectAllFailure,
+  CollectAllResult,
+  PollLobbyOptions,
+  PollPendingGrantsOptions,
+} from './resources.js';
+export {
+  InMemorySecretStore,
+  LocalStorageSecretStore,
+} from './secret-store.js';
+export type { SecretStore } from './secret-store.js';
+export {
+  openLeaderboardStream,
+} from './leaderboard-stream.js';
+export { openChatStream } from './chat-stream.js';
+export type { ChatStream, ChatStreamEvent } from './chat-stream.js';
+export type { ChatSendOptions, ChatSendPromise } from './resources.js';
+export type { StreamConnectionEvent, ReconnectOptions } from './reconnect.js';
+export type {
+  LeaderboardStream,
+  LeaderboardStreamEvent,
+  LeaderboardFinalizedData,
+  LeaderboardStanding,
+} from './leaderboard-stream.js';
+export { openInventoryStream } from './inventory-stream.js';
+export type {
+  InventoryStream,
+  InventoryStreamEvent,
+  InventoryEventOrigin,
+  InventoryChangedEvent,
+  WalletChangedEvent,
+  GrantCreatedEvent,
+  InventoryReadyEvent,
+} from './inventory-stream.js';
+export { openSseStream } from './sse.js';
+export type { SseEvent, SseStream } from './sse.js';
+export {
+  FinalizationTracker,
+  InMemoryMembershipStore,
+  LocalStorageMembershipStore,
+  MembershipKind,
+  FinalizationReason,
+  StandingKind,
+} from './finalization.js';
+export type {
+  MembershipStore,
+  MembershipRef,
+  EventLeaderboardRef,
+  LeaderboardRef,
+  TrackedMembership,
+  FinalStanding,
+  FinalizationResult,
+  FinalizationListener,
+  KeyValueStorage,
+} from './finalization.js';
+export {
+  KratyApiError,
+  KratyChatNotSentError,
+  KratyNetworkError,
+  isLobbyForming,
+} from './errors.js';
+export type { KratyErrorCode, KratyErrorPayload } from './errors.js';
+export {
+  lobbyFilledSlots,
+} from './types.js';
+export type {
+  Attempt,
+  AttemptQuota,
+  AttemptStatus,
+  BlockedPlayer,
+  BoardStandings,
+  Catalog,
+  CatalogCurrency,
+  CatalogDerivedProgression,
+  DailyLogin,
+  DailyLoginDay,
+  CreateGuildInput,
+  GuildClientConfig,
+  ChatChannel,
+  ChatClientConfig,
+  ChatConversation,
+  ChatConversationDetail,
+  ChatConversationMembers,
+  ChatConversationPage,
+  ChatCustomType,
+  ChatMember,
+  ChatMessageRules,
+  ChatMessage,
+  ChatMessagePage,
+  ChatPlayerRef,
+  ChatPreferences,
+  ChatProfanityMode,
+  ChatUnread,
+  ModerationStatus,
+  MyReport,
+  ReportCategory,
+  ReportInput,
+  Restriction,
+  GuildDetail,
+  GuildHelpSettings,
+  GuildUnlockStatus,
+  GuildWeekSchedule,
+  GuildHelpDonation,
+  GuildHelpOverview,
+  GuildHelpRequest,
+  GuildJoinRequest,
+  GuildJoinResult,
+  GuildJoinType,
+  GuildLeaveResult,
+  GuildMember,
+  GuildPermission,
+  GuildPlayerRef,
+  GuildProfilePatch,
+  GuildRole,
+  GuildSearchPage,
+  GuildSummary,
+  MyGuild,
+  RecommendedGuild,
+  CatalogItem,
+  ConsumeItemInput,
+  ConsumeItemResult,
+  DebitWalletInput,
+  DebitWalletResult,
+  EntryCost,
+  EntryCostCurrency,
+  EntryCostItem,
+  EventListing,
+  EventTeamMember,
+  EventTeamMembersPage,
+  TeamSeatMilestone,
+  TeamSeatState,
+  TeamSeatView,
+  TeamRollup,
+  TeamMatchResult,
+  PartnerPlayer,
+  PartnerInvite,
+  RandomPartnerResult,
+  PartnerSuggestion,
+  EventLeaderboard,
+  EventLeaderboardReadOptions,
+  FinishAttemptResponse,
+  Friend,
+  FriendCode,
+  FriendRelationship,
+  FriendRequest,
+  FriendRequestDirection,
+  FriendRequests,
+  FriendSearchResult,
+  FriendTarget,
+  Gift,
+  GiftCatalog,
+  GiftableResource,
+  GiftResourceType,
+  GiftStatus,
+  Grant,
+  GrantEntryInput,
+  GrantKind,
+  GrantSelfInput,
+  GrantStatus,
+  Leaderboard,
+  LeaderboardEntry,
+  LeaderboardEntryTeam,
+  LeaderboardPeriod,
+  LeaderboardPeriods,
+  LeaderboardReadOptions,
+  LeaderboardSummary,
+  LeaderboardScoreResult,
+  Lobby,
+  LobbyStatus,
+  MilestoneFired,
+  MilestoneRewardPreview,
+  OpenCrateResponse,
+  PlayerContext,
+  PlayerItemHolding,
+  PlayerPresence,
+  PlayerRegistration,
+  PlayerWalletHolding,
+  ProgressInput,
+  ProgressResponse,
+  PurchaseProductType,
+  PurchaseStore,
+  PurchaseValidationStatus,
+  SendFriendRequestResult,
+  SendGiftInput,
+  RewardBundlePreview,
+  RewardEntryPreview,
+  RewardPolicySummary,
+  StandingsReadOptions,
+  StandingsScope,
+  StandingsSegment,
+  StartAttemptResponse,
+  Suggestion,
+  TrackPurchaseInput,
+  TrackPurchaseResult,
+  Offer,
+  OfferClaim,
+  OfferClaimRefusalReason,
+  OfferClaimResult,
+  OfferCapReason,
+  OfferImpressionResult,
+  OfferState,
+  OfferTier,
+  OfferTierType,
+  OfferTriggerInput,
+  OfferTriggerResult,
+  PurchaseOfferResult,
+  StoreTransactionIds,
+} from './types.js';
+
+/**
+ * Convenience facade: instantiate one `Kraty` instead of wiring up
+ * `KratyClient` + each resource client by hand. All resource clients
+ * share the same underlying `KratyClient` so retry config, telemetry,
+ * and the HTTP connection pool are shared.
+ *
+ * @example
+ * ```ts
+ * const kraty = new Kraty({ apiKey: '&lt;your-client-sdk-key&gt;' });
+ * const events = await kraty.events.listForPlayer('player_42');
+ * ```
+ */
+export class Kraty {
+  readonly client: KratyClient;
+  readonly events: EventsClient;
+  readonly leaderboards: LeaderboardsClient;
+  readonly eventLeaderboards: EventLeaderboardsClient;
+  readonly grants: GrantsClient;
+  readonly lobbies: LobbiesClient;
+  readonly inventory: InventoryClient;
+  readonly wallet: WalletClient;
+  readonly players: PlayersClient;
+  readonly purchases: PurchasesClient;
+  readonly friends: FriendsClient;
+  readonly catalog: CatalogClient;
+  readonly dailyLogin: DailyLoginClient;
+  readonly guilds: GuildsClient;
+  readonly offers: OffersClient;
+  readonly chat: ChatClient;
+  readonly moderation: ModerationClient;
+
+  constructor(opts: KratyClientOptions) {
+    this.client = new KratyClient(opts);
+    this.events = new EventsClient(this.client);
+    this.leaderboards = new LeaderboardsClient(this.client);
+    this.eventLeaderboards = new EventLeaderboardsClient(this.client);
+    this.grants = new GrantsClient(this.client);
+    this.lobbies = new LobbiesClient(this.client);
+    this.inventory = new InventoryClient(this.client);
+    this.wallet = new WalletClient(this.client);
+    this.players = new PlayersClient(this.client);
+    this.purchases = new PurchasesClient(this.client);
+    this.friends = new FriendsClient(this.client);
+    this.catalog = new CatalogClient(this.client);
+    this.dailyLogin = new DailyLoginClient(this.client);
+    this.guilds = new GuildsClient(this.client);
+    this.offers = new OffersClient(this.client);
+    this.chat = new ChatClient(this.client);
+    this.moderation = new ModerationClient(this.client);
+  }
+
+  /**
+   * Record a real-money purchase for the active player.
+   *
+   * Shorthand for `kraty.purchases.track(...)`, promoted to the top
+   * level because reporting a purchase is a one-liner a game does from
+   * inside its store callback and shouldn't have to reach through a
+   * namespace for.
+   *
+   * ```ts
+   * await kraty.trackPurchase({
+   *   // StoreKit 2 `transactionId` (Google Play: `orderId`); see `canonicalTransactionId`.
+   *   transactionId: storeTx.transactionId,
+   *   store: 'app_store',
+   *   productId: 'gems_500',
+   *   amountMinor: 499,   // $4.99 — minor units, as charged
+   *   currency: 'USD',
+   *   receipt: storeTx.receipt,
+   *   offerInstanceId: offer?.instanceId, // when bought from `kraty.offers.list()`
+   * });
+   * ```
+   *
+   * Idempotent on `transactionId`, so calling it on every restore
+   * without tracking what you already reported is the intended usage.
+   */
+  async trackPurchase(
+    input: TrackPurchaseInput,
+    opts: { as?: string } = {},
+  ): Promise&lt;TrackPurchaseResult&gt; {
+    return this.purchases.track(input, opts);
+  }
+
+  /**
+   * The active player this SDK is currently representing. Returns
+   * `null` until the first player-scoped call resolves the
+   * identity (or `ensureIdentity()` is awaited explicitly). The
+   * field is mutable: it advances from `null` → a `kp_…` UUID on
+   * fresh signups, or to a persisted id when one is recovered.
+   */
+  get activeExternalPlayerId(): string | null {
+    return this.client.activeExternalPlayerId;
+  }
+
+  /**
+   * The player's generated fake identity (`{ name, avatar }`) or null.
+   * Populated after a fresh register (via `connectAsPlayer` or the first
+   * player-scoped call that auto-registers). Use it to greet the player or
+   * show them on a public board without their real profile:
+   *
+   * ```ts
+   * const kraty = await Kraty.connectAsPlayer({ options, externalPlayerId, secretStore });
+   * greet(kraty.syntheticIdentity?.name ?? 'Player'); // "Crazy Panda"
+   * ```
+   */
+  get syntheticIdentity(): { name: string; avatar?: string | null } | null {
+    return this.client.syntheticIdentity;
+  }
+
+  /**
+   * Resolve the active player identity, registering a fresh one
+   * if no persisted identity exists. Most games don't need to
+   * call this; any player-scoped method (events, grants,
+   * inventory, …) triggers it transparently. Reach for it only
+   * when you want the id available before the first request (to
+   * pre-greet the player by id, say).
+   */
+  ensureIdentity(): ReturnType&lt;KratyClient['ensureIdentity']&gt; {
+    return this.client.ensureIdentity();
+  }
+
+  /**
+   * Forget the persisted identity. The next player-scoped call
+   * lazily registers a new player (or resumes a different id if
+   * the SecretStore holds one). Drop-in for a "sign out" button.
+   */
+  logout(): Promise&lt;void&gt; {
+    return this.client.logout();
+  }
+
+  /**
+   * Finalization catch-up (docs/05b). `onFinalized` fires when a board the
+   * player is in ends: live over SSE while subscribed, OR via
+   * `checkFinalizations()` for boards that finalized while they were away
+   * (call it on app foreground / reconnect). Both paths deliver exactly once.
+   * `dismiss`/`clearReported` acknowledge handled results so they leave storage.
+   */
+  onFinalized(cb: Parameters&lt;KratyClient['onFinalized']&gt;[0]): () =&gt; void {
+    return this.client.onFinalized(cb);
+  }
+  checkFinalizations(): ReturnType&lt;KratyClient['checkFinalizations']&gt; {
+    return this.client.checkFinalizations();
+  }
+  dismiss(ref: Parameters&lt;KratyClient['dismiss']&gt;[0]): Promise&lt;void&gt; {
+    return this.client.dismiss(ref);
+  }
+  clearReported(): Promise&lt;number&gt; {
+    return this.client.clearReported();
+  }
+
+  /**
+   * Server clock. Fetch the backend's time so game timers can't be cheated by
+   * changing the device clock. `getServerTime()` is a one-shot fetch;
+   * `syncTime()` + `serverNow()` give a tamper-proof local clock anchored to
+   * the server via a monotonic reference (call `syncTime()` at startup + on
+   * resume). Compare `serverNow()`/`epochMs` against event `endsAt`.
+   */
+  getServerTime(opts?: Parameters&lt;KratyClient['getServerTime']&gt;[0]): ReturnType&lt;KratyClient['getServerTime']&gt; {
+    return this.client.getServerTime(opts);
+  }
+  syncTime(): Promise&lt;void&gt; {
+    return this.client.syncTime();
+  }
+  get isTimeSynced(): boolean {
+    return this.client.isTimeSynced;
+  }
+  serverNowMs(): number {
+    return this.client.serverNowMs();
+  }
+  serverNow(): Date {
+    return this.client.serverNow();
+  }
+
+  /**
+   * Install an explicit identity on this SDK and persist it.
+   * Use when your own auth gave you back a Kraty
+   * `externalPlayerId` + `secret`, e.g. on a new device after a
+   * server-side device-link flow.
+   */
+  signIn(identity: { externalPlayerId: string; secret: string }): Promise&lt;void&gt; {
+    return this.client.signIn(identity);
+  }
+
+  /**
+   * Adaptive polling helper bound to this instance's grants client.
+   * Defaults to the active player; pass `{ as }` to poll a different
+   * player.
+   */
+  pollPendingGrants(
+    opts?: Parameters&lt;typeof pollPendingGrants&gt;[1],
+  ): Promise&lt;void&gt; {
+    return pollPendingGrants(this.grants, opts);
+  }
+
+  /** Polls a lobby until it transitions out of `'forming'`. */
+  pollLobbyUntilActive(
+    lobbyId: string,
+    opts?: Parameters&lt;typeof pollLobbyUntilActive&gt;[2],
+  ): ReturnType&lt;typeof pollLobbyUntilActive&gt; {
+    return pollLobbyUntilActive(this.lobbies, lobbyId, opts);
+  }
+
+  /**
+   * Bootstrap a player-authenticated `Kraty` in one call. Reads the
+   * stored secret from `secretStore`, registers if absent, retries
+   * with `force: true` on a `player_already_registered` 409 (dev/test
+   * envs only; production keys reject `force` and the 409 surfaces
+   * to the caller for a real account-recovery flow), persists the
+   * secret back to the store, and returns a `Kraty` wired with the
+   * secret on every subsequent request.
+   *
+   * Use this instead of `new Kraty(...)` when the consumer is a game
+   * client that just wants "give me a working SDK for this player."
+   * For server-side use (where there's no player concept) keep using
+   * the constructor with `playerSecret` unset.
+   *
+   * Throws `KratyApiError` on unrecoverable failures (e.g. wrong SDK
+   * key → 401 `session_invalid`, or a 409 on a live env).
+   */
+  static async connectAsPlayer(args: {
+    options: KratyClientOptions;
+    externalPlayerId: string;
+    secretStore: SecretStore;
+    /**
+     * When true (default), retry register with `force: true` on 409.
+     * Set false to surface the 409 to your own recovery UX instead.
+     * Production `client_sdk` keys reject `force`, so a `live` SDK
+     * key surfaces the 409 even with this true.
+     */
+    autoRotateOnConflict?: boolean;
+  }): Promise&lt;Kraty&gt; {
+    const { options, externalPlayerId, secretStore } = args;
+    const autoRotate = args.autoRotateOnConflict ?? true;
+
+    const stored = await secretStore.read(externalPlayerId);
+    if (stored &amp;&amp; stored.length &gt; 0) {
+      // Happy path: secret already on this device, so wire up
+      // immediately, no register round-trip needed.
+      await secretStore.writeActiveExternalPlayerId?.(externalPlayerId);
+      return new Kraty({
+        ...options,
+        playerSecret: stored,
+        activeExternalPlayerId: externalPlayerId,
+      });
+    }
+
+    // First-launch / wiped-data path: register, store, re-wire.
+    const preRegister = new Kraty({ ...options, playerSecret: undefined });
+    let reg;
+    try {
+      reg = await preRegister.players.register(externalPlayerId);
+    } catch (err) {
+      if (
+        autoRotate &amp;&amp;
+        err instanceof KratyApiError &amp;&amp;
+        err.isPlayerAlreadyRegistered
+      ) {
+        reg = await preRegister.players.register(externalPlayerId, { force: true });
+      } else {
+        throw err;
+      }
+    }
+    await secretStore.write(externalPlayerId, reg.secret);
+    await secretStore.writeActiveExternalPlayerId?.(externalPlayerId);
+    const kraty = new Kraty({
+      ...options,
+      playerSecret: reg.secret,
+      activeExternalPlayerId: externalPlayerId,
+    });
+    // Carry the fake identity the register response minted so
+    // `kraty.syntheticIdentity` is populated on this happy path.
+    kraty.client.setSyntheticIdentity(reg.syntheticIdentity ?? null);
+    return kraty;
+  }
+
+  /**
+   * Recover the active player identity from a `SecretStore`. Returns
+   * `{ externalPlayerId, secret }` when the device has previously
+   * connected, or `null` when it hasn't (fresh install, post-logout).
+   *
+   * Typical use: at app boot, read the stored identity to decide
+   * whether to render the "tap to play" guest screen or jump straight
+   * into the authenticated session.
+   *
+   * ```ts
+   * const stored = await Kraty.readStoredIdentity(secretStore);
+   * if (stored) {
+   *   const kraty = new Kraty({ apiKey, playerSecret: stored.secret });
+   *   return startGame(stored.externalPlayerId, kraty);
+   * }
+   * return showOnboarding();
+   * ```
+   */
+  static async readStoredIdentity(
+    secretStore: SecretStore,
+  ): Promise&lt;{ externalPlayerId: string; secret: string } | null&gt; {
+    if (!secretStore.readActiveExternalPlayerId) return null;
+    const externalPlayerId = await secretStore.readActiveExternalPlayerId();
+    if (!externalPlayerId) return null;
+    const secret = await secretStore.read(externalPlayerId);
+    if (!secret) return null;
+    return { externalPlayerId, secret };
+  }
+
+  /**
+   * Write a `(externalPlayerId, secret)` pair back into the store
+   * as the active identity. Used by recovery flows; e.g. studio
+   * support hands the player a one-shot reissued secret, the client
+   * stamps it into the store and resumes play.
+   *
+   * Does NOT validate the secret with the server. If the pair turns
+   * out to be wrong, the next authenticated request will 401
+   * `player_secret_invalid`; the consumer should catch that and
+   * fall back to the register flow.
+   */
+  static async restoreStoredIdentity(
+    secretStore: SecretStore,
+    identity: { externalPlayerId: string; secret: string },
+  ): Promise&lt;void&gt; {
+    await secretStore.write(identity.externalPlayerId, identity.secret);
+    await secretStore.writeActiveExternalPlayerId?.(identity.externalPlayerId);
+  }
+
+  /**
+   * Clear the active identity pointer (logout). The underlying
+   * secret stays in the store unless the caller also `.remove()`s
+   * it explicitly, useful if your UX wants "switch account" to
+   * remember credentials for both players and just swap which is
+   * active.
+   */
+  static async clearStoredIdentity(secretStore: SecretStore): Promise&lt;void&gt; {
+    await secretStore.clearActiveExternalPlayerId?.();
+  }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

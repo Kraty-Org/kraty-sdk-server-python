@@ -1,0 +1,2869 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-flutter/lib/src/resources.dart</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-flutter/lib/src/resources.dart</h1><p class=muted>kraty-sdk-flutter/lib/src/resources.dart</p><pre><code class="language-dart">import 'dart:async';
+import 'dart:math' as math;
+
+import 'chat_stream.dart';
+import 'client.dart';
+import 'errors.dart';
+import 'finalization.dart';
+import 'inventory_stream.dart';
+import 'leaderboard_stream.dart';
+import 'reconnecting_sse.dart';
+import 'types.dart';
+
+/// Helper: unwrap the `{ "data": T }` envelope every SDK endpoint
+/// returns.
+T _data&lt;T&gt;(Map&lt;String, Object?&gt; envelope, T Function(Object?) decode) {
+  return decode(envelope['data']);
+}
+
+String _enc(String s) =&gt; Uri.encodeComponent(s);
+
+/// Player-scoped resource methods accept an optional [as] override
+/// instead of requiring the caller to pass an externalPlayerId on
+/// every call. We resolve it from (1) the explicit [as] value, or
+/// (2) `client.ensureIdentity()`, which lazily mints + persists a
+/// player on the very first call when no identity is configured.
+Future&lt;String&gt; _resolvePlayerId(KratyClient client, String? as) async {
+  if (as != null &amp;&amp; as.isNotEmpty) return as;
+  final identity = await client.ensureIdentity();
+  return identity.externalPlayerId;
+}
+
+/// Resource client for the `/sdk/v1/players/.../events/...` surface:
+/// list, start, progress.
+class EventsClient {
+  final KratyClient _client;
+
+  EventsClient(this._client);
+
+  /// `GET /sdk/v1/players/:externalId/events`: events whose current
+  /// window the active player can start now. Pass `as:` to address a
+  /// different player (server-side tooling only).
+  Future&lt;List&lt;EventListing&gt;&gt; listForPlayer({String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/events',
+    );
+    return _data&lt;List&lt;EventListing&gt;&gt;(env, (raw) {
+      if (raw is List) {
+        return raw
+            .whereType&lt;Map&lt;String, Object?&gt;&gt;()
+            .map((e) =&gt;EventListing.fromJson(e.cast&lt;String, Object?&gt;()))
+            .toList();
+      }
+      return &lt;EventListing&gt;[];
+    });
+  }
+
+  /// `POST /sdk/v1/players/:p/events/:e/start`: start an attempt for
+  /// the active player.
+  ///
+  /// If the event uses matchmaking and the lobby is still forming,
+  /// the server returns 202 with `error.code = 'lobby_forming'`, and
+  /// the SDK surfaces this as a `KratyApiError`. Consumers should
+  /// poll the lobby endpoint and retry.
+  Future&lt;StartAttemptResponse&gt; start(
+    String eventKey, {
+    Map&lt;String, Object?&gt;? playerContext,
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/events/${_enc(eventKey)}/start',
+      body: &lt;String, Object?&gt;{
+        if (playerContext != null) 'playerContext': playerContext,
+      },
+    );
+    final res = _data&lt;StartAttemptResponse&gt;(env, (raw) {
+      if (raw is Map) return StartAttemptResponse.fromJson(raw.cast&lt;String, Object?&gt;());
+      return StartAttemptResponse(
+        attempt: Attempt.fromJson(const &lt;String, Object?&gt;{}),
+        leaderboardId: '',
+        windowEndsAt: '',
+      );
+    });
+    // Track the session/event board for finalization catch-up (docs/05b);
+    // fire-and-forget so it never adds latency to start.
+    if (res.leaderboardId.isNotEmpty) {
+      unawaited(_client
+          .trackMembership(MembershipRef.eventLeaderboard(res.leaderboardId, eventKey: eventKey))
+          .catchError((_) {}));
+    }
+    return res;
+  }
+
+  /// `POST /sdk/v1/players/:p/events/:e/attempts/:a/progress`:
+  /// push a metric update for the active player. Returns the updated
+  /// attempt plus any milestones whose threshold was crossed by THIS
+  /// update (empty list when nothing fired).
+  Future&lt;ProgressResponse&gt; progress(
+    String eventKey,
+    String attemptId,
+    ProgressInput input, {
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/events/${_enc(eventKey)}/attempts/${_enc(attemptId)}/progress',
+      body: input.toJson(),
+    );
+    return _data&lt;ProgressResponse&gt;(env, (raw) {
+      if (raw is Map) {
+        return ProgressResponse.fromJson(raw.cast&lt;String, Object?&gt;());
+      }
+      return ProgressResponse.fromJson(&lt;String, Object?&gt;{
+        'attempt': &lt;String, Object?&gt;{},
+        'milestonesFired': &lt;Object?&gt;[],
+      });
+    });
+  }
+
+  /// `POST /sdk/v1/players/:p/events/:e/attempts/:a/finish`: end an
+  /// in-progress attempt now, locking in its current score. This is the
+  /// player-driven "I'm done" / "cash out my run" action, needed for
+  /// score-attack events (no completion target) where the player decides
+  /// when the run ends. `outcome` is `'completed'` (score-attack end / target
+  /// met, so completion rewards roll) or `'expired'` (a target event ended
+  /// early). Pull any rewards afterwards with `grants.collectAll()`.
+  Future&lt;FinishAttemptResponse&gt; finish(
+    String eventKey,
+    String attemptId, {
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/events/${_enc(eventKey)}/attempts/${_enc(attemptId)}/finish',
+    );
+    return _data&lt;FinishAttemptResponse&gt;(env, (raw) {
+      if (raw is Map) {
+        return FinishAttemptResponse.fromJson(raw.cast&lt;String, Object?&gt;());
+      }
+      return FinishAttemptResponse.fromJson(&lt;String, Object?&gt;{
+        'attempt': &lt;String, Object?&gt;{},
+        'outcome': 'completed',
+      });
+    });
+  }
+}
+
+/// Resource client for `/sdk/v1/leaderboards/:key`: the
+/// dashboard-configured cross-event boards your studio defines. For
+/// the auto-created per-event-window boards addressed by UUID, see
+/// [EventLeaderboardsClient].
+class LeaderboardsClient {
+  final KratyClient _client;
+
+  LeaderboardsClient(this._client);
+
+  /// `GET /sdk/v1/leaderboards`: the game's dashboard-configured boards
+  /// (archived ones left out), so the client can discover keys instead of
+  /// hard-coding them.
+  Future&lt;List&lt;LeaderboardSummary&gt;&gt; list() async {
+    final env = await _client.request(method: 'GET', path: '/sdk/v1/leaderboards');
+    return _data&lt;List&lt;LeaderboardSummary&gt;&gt;(env, (raw) {
+      if (raw is List) {
+        return raw
+            .whereType&lt;Map&lt;Object?, Object?&gt;&gt;()
+            .map((e) =&gt; LeaderboardSummary.fromJson(e.cast&lt;String, Object?&gt;()))
+            .toList();
+      }
+      return &lt;LeaderboardSummary&gt;[];
+    });
+  }
+
+  /// `GET /sdk/v1/leaderboards/:key`: snapshot read of a
+  /// dashboard-configured cross-event leaderboard.
+  ///
+  /// `options.segment` is required only for `context`-segmented
+  /// boards; pass the bucket value. For `progression`-segmented
+  /// boards omit it; the server derives the caller's division.
+  /// Unsegmented boards ignore it.
+  Future&lt;Leaderboard&gt; read(
+    String key, {
+    LeaderboardReadOptions? options,
+  }) async {
+    final opts = options ?? const LeaderboardReadOptions();
+    final qs = &lt;String&gt;[];
+    if (opts.limit != null) qs.add('limit=${opts.limit}');
+    if (opts.progression != null &amp;&amp; opts.progression!.isNotEmpty) {
+      qs.add('progression=${_enc(opts.progression!.join(','))}');
+    }
+    if (opts.segment != null &amp;&amp; opts.segment!.isNotEmpty) {
+      qs.add('segment=${_enc(opts.segment!)}');
+    }
+    if (opts.period != null &amp;&amp; opts.period!.isNotEmpty) {
+      qs.add('period=${_enc(opts.period!)}');
+    }
+    if (opts.includeSelf) {
+      final selfId = (opts.externalId != null &amp;&amp; opts.externalId!.isNotEmpty)
+          ? opts.externalId!
+          : await _resolvePlayerId(_client, null);
+      qs.add('includeSelf=true');
+      qs.add('externalId=${_enc(selfId)}');
+    }
+    final path = qs.isEmpty
+        ? '/sdk/v1/leaderboards/${_enc(key)}'
+        : '/sdk/v1/leaderboards/${_enc(key)}?${qs.join('&amp;')}';
+    final env = await _client.request(method: 'GET', path: path);
+    return _data&lt;Leaderboard&gt;(env, (raw) {
+      if (raw is Map) return Leaderboard.fromJson(raw.cast&lt;String, Object?&gt;());
+      return Leaderboard.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `POST /sdk/v1/players/:p/leaderboards/:key/score`: submit a
+  /// score for the active player directly to a dashboard-configured
+  /// board, outside an event attempt. Returns the player's new score
+  /// + rank.
+  ///
+  /// [segment] is required only for `context`-segmented boards (pass
+  /// the bucket value). For `progression`-segmented boards omit it;
+  /// the server derives the player's division; unsegmented boards
+  /// ignore it. Auto-stamped idempotency key unless you pass
+  /// [idempotencyKey].
+  ///
+  /// Throws [KratyApiError]: `client_scoring_disabled` (403) when the
+  /// board is server-only, `score_not_supported` (400) on a
+  /// progression-ranked board, `not_found` (404), `validation_failed`
+  /// (400). Pass `as:` to address a different player (server-side
+  /// tooling only).
+  Future&lt;LeaderboardScoreResult&gt; submitScore(
+    String key,
+    num value, {
+    String? segment,
+    String? idempotencyKey,
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/leaderboards/${_enc(key)}/score',
+      body: &lt;String, Object?&gt;{
+        'value': value,
+        if (segment != null &amp;&amp; segment.isNotEmpty) 'segment': segment,
+        if (idempotencyKey != null) 'idempotencyKey': idempotencyKey,
+      },
+    );
+    return _data&lt;LeaderboardScoreResult&gt;(env, (raw) {
+      if (raw is Map) {
+        return LeaderboardScoreResult.fromJson(raw.cast&lt;String, Object?&gt;());
+      }
+      return LeaderboardScoreResult.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `POST /sdk/v1/players/:p/leaderboards/:key/join`: add the active
+  /// player to a dashboard-configured board at score 0 WITHOUT
+  /// submitting a score (they just "appear"), and return the current
+  /// standings for their segment. Idempotent, so it never resets an
+  /// existing score.
+  ///
+  /// [segment] is the bucket value for `context`-segmented boards;
+  /// derived server-side for `progression` boards. The returned
+  /// [Leaderboard.joined] is `true`. Pass `as:` to address a different
+  /// player (server-side tooling only).
+  Future&lt;Leaderboard&gt; join(
+    String key, {
+    String? segment,
+    int? limit,
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final qs = limit != null ? '?limit=$limit' : '';
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/leaderboards/${_enc(key)}/join$qs',
+      body: &lt;String, Object?&gt;{
+        if (segment != null &amp;&amp; segment.isNotEmpty) 'segment': segment,
+      },
+    );
+    return _data&lt;Leaderboard&gt;(env, (raw) {
+      if (raw is Map) return Leaderboard.fromJson(raw.cast&lt;String, Object?&gt;());
+      return Leaderboard.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `GET /sdk/v1/leaderboards/:key/standings`: flexible multi-segment
+  /// read. Returns one [StandingsSegment] block per segment
+  /// (`options.scope` picks which), each flagging the caller (`isSelf`
+  /// on entries, `selfRank`, `participated`). Works live
+  /// (`period: "current"`) or for a past period.
+  ///
+  /// Use this over [read] when you want "my division"
+  /// (`scope: "self_segment"`), "every division I'm in"
+  /// (`scope: "mine"`), or the whole ladder (`scope: "all"`, the
+  /// default). `self_segment` and `mine` resolve the caller from
+  /// `options.externalId` (or the SDK's active identity).
+  Future&lt;BoardStandings&gt; standings(
+    String key, {
+    StandingsReadOptions? options,
+  }) async {
+    final opts = options ?? const StandingsReadOptions();
+    final scope = (opts.scope != null &amp;&amp; opts.scope!.isNotEmpty)
+        ? opts.scope!
+        : 'all';
+    final qs = &lt;String&gt;['scope=${_enc(scope)}'];
+    if (opts.segment != null &amp;&amp; opts.segment!.isNotEmpty) {
+      qs.add('segment=${_enc(opts.segment!)}');
+    }
+    if (opts.period != null &amp;&amp; opts.period!.isNotEmpty) {
+      qs.add('period=${_enc(opts.period!)}');
+    }
+    if (opts.limit != null) qs.add('limit=${opts.limit}');
+    if (opts.maxSegments != null) qs.add('maxSegments=${opts.maxSegments}');
+    if (opts.progression != null &amp;&amp; opts.progression!.isNotEmpty) {
+      qs.add('progression=${_enc(opts.progression!.join(','))}');
+    }
+    // self_segment / mine need a caller; auto-resolve the active
+    // identity when the dev didn't pass one explicitly.
+    var externalId = opts.externalId;
+    if ((externalId == null || externalId.isEmpty) &amp;&amp;
+        (scope == 'self_segment' || scope == 'mine')) {
+      externalId = await _resolvePlayerId(_client, null);
+    }
+    if (externalId != null &amp;&amp; externalId.isNotEmpty) {
+      qs.add('externalId=${_enc(externalId)}');
+    }
+    final env = await _client.request(
+      method: 'GET',
+      path: '/sdk/v1/leaderboards/${_enc(key)}/standings?${qs.join('&amp;')}',
+    );
+    return _data&lt;BoardStandings&gt;(env, (raw) {
+      if (raw is Map) return BoardStandings.fromJson(raw.cast&lt;String, Object?&gt;());
+      return BoardStandings.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `GET /sdk/v1/leaderboards/:key/periods`: newest-first list
+  /// of finalized snapshot periods. Pair with [read] +
+  /// `LeaderboardReadOptions.period` to render "last week's top 10".
+  Future&lt;LeaderboardPeriods&gt; listPeriods(String key, {int? limit}) async {
+    final path = limit == null
+        ? '/sdk/v1/leaderboards/${_enc(key)}/periods'
+        : '/sdk/v1/leaderboards/${_enc(key)}/periods?limit=$limit';
+    final env = await _client.request(method: 'GET', path: path);
+    return _data&lt;LeaderboardPeriods&gt;(env, (raw) {
+      if (raw is Map) return LeaderboardPeriods.fromJson(raw.cast&lt;String, Object?&gt;());
+      return LeaderboardPeriods.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+}
+
+/// Resource client for `/sdk/v1/event-leaderboards/:id`: the auto-generated
+/// per-event-window leaderboard, addressed by the UUID
+/// `events.start(...)` returns in `attempt.leaderboardId`. Includes
+/// Server-Sent-Events live streaming. For the dashboard-configured
+/// cross-event boards, see [LeaderboardsClient].
+class EventLeaderboardsClient {
+  final KratyClient _client;
+
+  EventLeaderboardsClient(this._client);
+
+  Future&lt;EventLeaderboard&gt; read(
+    String leaderboardId, {
+    EventLeaderboardReadOptions? options,
+  }) async {
+    final opts = options ?? const EventLeaderboardReadOptions();
+    final qs = &lt;String&gt;[];
+    if (opts.limit != null) qs.add('limit=${opts.limit}');
+    if (opts.progression != null &amp;&amp; opts.progression!.isNotEmpty) {
+      qs.add('progression=${_enc(opts.progression!.join(','))}');
+    }
+    if (opts.includeSelf) {
+      final selfId = (opts.externalId != null &amp;&amp; opts.externalId!.isNotEmpty)
+          ? opts.externalId!
+          : await _resolvePlayerId(_client, null);
+      qs.add('includeSelf=true');
+      qs.add('externalId=${_enc(selfId)}');
+    }
+    final path = qs.isEmpty
+        ? '/sdk/v1/event-leaderboards/${_enc(leaderboardId)}'
+        : '/sdk/v1/event-leaderboards/${_enc(leaderboardId)}?${qs.join('&amp;')}';
+    final env = await _client.request(method: 'GET', path: path);
+    return _data&lt;EventLeaderboard&gt;(env, (raw) {
+      if (raw is Map) return EventLeaderboard.fromJson(raw.cast&lt;String, Object?&gt;());
+      return EventLeaderboard.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `POST /sdk/v1/players/:p/event-leaderboards/:id/join`: add the
+  /// active player to a per-event-window board at score 0 WITHOUT
+  /// starting a scoring attempt, and return the current board. The
+  /// returned [EventLeaderboard.joined] is `true`. Idempotent.
+  ///
+  /// Throws [KratyApiError] with code `conflict` (409) once the window
+  /// has been finalized. Pass `as:` to address a different player
+  /// (server-side tooling only).
+  Future&lt;EventLeaderboard&gt; join(
+    String leaderboardId, {
+    int? limit,
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final qs = limit != null ? '?limit=$limit' : '';
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/event-leaderboards/${_enc(leaderboardId)}/join$qs',
+      body: const &lt;String, Object?&gt;{},
+    );
+    return _data&lt;EventLeaderboard&gt;(env, (raw) {
+      if (raw is Map) return EventLeaderboard.fromJson(raw.cast&lt;String, Object?&gt;());
+      return EventLeaderboard.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `GET /sdk/v1/event-leaderboards/:id/stream`: opens a Server-Sent
+  /// Events subscription that pushes score updates in real time.
+  /// Returns a [LeaderboardStream] handle the caller drives via
+  /// its `events` stream + `cancel()` method.
+  ///
+  /// Event kinds the server emits today:
+  ///   - `ready`: handshake, sent once after the pub/sub
+  ///     subscription is wired. Safe to start POSTing progress as
+  ///     soon as this lands without missing the resulting update.
+  ///   - `score_update`: a participant's score changed; payload
+  ///     carries the new rank/score for the affected entry.
+  ///   - `closed`: the board ended for good. After this, the stream
+  ///     completes (it never reconnects) and `cancel()` is a no-op.
+  ///
+  /// Reconnects on its own by default ([autoReconnect]): after a server
+  /// `close` (waits its `retryAfterMs`), a network drop, a busy 503 (waits
+  /// `Retry-After`) or [heartbeatTimeout] of silence (default 40 s; the
+  /// server pings every 15 s; [Duration.zero] turns the watchdog off), with jittered backoff capped at 15 s. No
+  /// replay: watch `connection` and re-read the board on `connected` if
+  /// you need exact standings. Only fatal errors (e.g. 404) land on
+  /// `errors`. A fatal failure of the very first connect throws here.
+  /// Pass `autoReconnect: false` for the old single connection: `errors`
+  /// carries drops and you re-call `live()` yourself.
+  ///
+  /// Low-level: prefer [subscribe] for game UIs; it polls in the
+  /// background so bot scores tick even when no player action would
+  /// otherwise trigger a server-side read.
+  Future&lt;LeaderboardStream&gt; live(
+    String leaderboardId, {
+    bool autoReconnect = true,
+    Duration heartbeatTimeout = const Duration(seconds: 40),
+  }) {
+    return openLeaderboardStream(
+      baseUrl: _client.baseUrlForStreaming,
+      leaderboardId: leaderboardId,
+      authHeader: _client.authHeaderForStreaming,
+      httpClient: _client.httpForStreaming,
+      playerSecret: _client.playerSecretForStreaming,
+      currentPlayerSecret: () =&gt; _client.playerSecretForStreaming,
+      sdkUserAgent: _client.sdkUserAgentForStreaming,
+      autoReconnect: autoReconnect,
+      heartbeatTimeout: heartbeatTimeout,
+    );
+  }
+
+  /// High-level live leaderboard subscription. Composes:
+  ///
+  /// 1. the SSE stream from [live] (real-time push for score updates
+  ///    the server has published), AND
+  /// 2. a periodic background [read] poll that nudges the server's
+  ///    lazy bot evaluator to advance bot scores, then dedupes the
+  ///    resulting deltas against the SSE feed.
+  ///
+  /// Why both: bot scores climb on a schedule (per the event's bot
+  /// definitions) even when no player action would otherwise trigger
+  /// a server-side read. Without the background poll, idle UIs never
+  /// see bots tick. The SSE stream then carries the resulting
+  /// `score_update` events so multiple subscribers per leaderboard
+  /// share one fan-out.
+  ///
+  /// The returned [LiveLeaderboardSubscription] exposes a single
+  /// `events` stream that interleaves SSE pushes + poll-derived
+  /// updates, deduped so the same `(participantId, score)` doesn't
+  /// surface twice. Call `cancel()` to tear down both transports.
+  ///
+  /// Defaults: `pollInterval: const Duration(seconds: 15)`. Set
+  /// `pollInterval: Duration.zero` to disable polling (SSE-only).
+  LiveLeaderboardSubscription subscribe(
+    String leaderboardId, {
+    Duration pollInterval = const Duration(seconds: 15),
+  }) {
+    final eventsCtrl = StreamController&lt;LeaderboardStreamEvent&gt;.broadcast();
+    final errorsCtrl = StreamController&lt;Object&gt;.broadcast();
+    final lastSurfacedScore = &lt;String, double&gt;{};
+    var closed = false;
+    LeaderboardStream? sseHandle;
+    Timer? pollTimer;
+    StreamSubscription&lt;LeaderboardStreamEvent&gt;? sseEventSub;
+    StreamSubscription&lt;Object&gt;? sseErrorSub;
+
+    void surface(LeaderboardStreamEvent ev) {
+      if (closed) return;
+      // A live `finalized` event also updates the membership registry (not
+      // just the callback) through the same single writer as catch-up;
+      // see docs/05b. Fire-and-forget; the user still gets `ev` below.
+      if (ev.kind == 'finalized') {
+        unawaited(_client.routeFinalized(leaderboardId, ev.data).catchError((_) {}));
+      }
+      // Dedup score_update by (participantId, score). Other kinds
+      // (ready, closed, parse-error) always pass through.
+      if (ev.kind == 'score_update') {
+        final pid = ev.data['participantId'];
+        final score = ev.data['score'];
+        if (pid is String &amp;&amp; score is num) {
+          final s = score.toDouble();
+          if (lastSurfacedScore[pid] == s) return;
+          lastSurfacedScore[pid] = s;
+        }
+      }
+      eventsCtrl.add(ev);
+    }
+
+    Future&lt;void&gt; pollOnce() async {
+      if (closed) return;
+      try {
+        final lb = await read(leaderboardId);
+        for (final entry in lb.entries) {
+          surface(LeaderboardStreamEvent(kind: 'score_update', data: &lt;String, Object?&gt;{
+            'leaderboardId': lb.leaderboardId,
+            'participantId': entry.participantId,
+            'score': entry.score,
+            'rank': entry.rank,
+          }));
+        }
+      } catch (err) {
+        if (!closed) errorsCtrl.add(err);
+      }
+    }
+
+    // Wire SSE in the background: surface failures on the errors
+    // stream but don't kill the poll loop if SSE drops.
+    Future&lt;void&gt;(() async {
+      try {
+        sseHandle = await live(leaderboardId);
+      } catch (err) {
+        if (!closed) errorsCtrl.add(err);
+        return;
+      }
+      sseEventSub = sseHandle!.events.listen(surface);
+      sseErrorSub = sseHandle!.errors.listen((err) {
+        if (!closed) errorsCtrl.add(err);
+      });
+    });
+
+    // Kick off the poll loop. First read fires immediately so the
+    // initial UI frame has current scores instead of waiting a full
+    // interval. Repeat with Timer.periodic afterwards.
+    if (pollInterval &gt; Duration.zero) {
+      Future&lt;void&gt;(() async {
+        await pollOnce();
+        if (!closed) {
+          pollTimer = Timer.periodic(pollInterval, (_) =&gt; pollOnce());
+        }
+      });
+    }
+
+    return LiveLeaderboardSubscription._(
+      eventsCtrl.stream,
+      errorsCtrl.stream,
+      () async {
+        if (closed) return;
+        closed = true;
+        pollTimer?.cancel();
+        await sseEventSub?.cancel();
+        await sseErrorSub?.cancel();
+        if (sseHandle != null) {
+          try { await sseHandle!.cancel(); } catch (_) { /* swallow */ }
+        }
+        await eventsCtrl.close();
+        await errorsCtrl.close();
+      },
+    );
+  }
+}
+
+/// Handle to a combined live + poll subscription from
+/// [LeaderboardsClient.subscribe]. Single `events` stream that
+/// interleaves SSE pushes and poll-derived deltas, plus an `errors`
+/// stream for transport failures. Call [cancel] to tear down both
+/// transports.
+class LiveLeaderboardSubscription {
+  /// Merged event stream: yields `score_update` (deduped per
+  /// participant) plus any other SSE event kinds (`ready`, `closed`,
+  /// `parse-error`). Broadcast-style; safe for multiple listeners.
+  final Stream&lt;LeaderboardStreamEvent&gt; events;
+
+  /// Transport / poll failures. Non-fatal, so the subscription keeps
+  /// running. SSE drops don't stop the background poll, and vice
+  /// versa.
+  final Stream&lt;Object&gt; errors;
+
+  final Future&lt;void&gt; Function() _cancel;
+
+  const LiveLeaderboardSubscription._(this.events, this.errors, this._cancel);
+
+  /// Cancels the SSE stream and the background poll. Idempotent.
+  Future&lt;void&gt; cancel() =&gt; _cancel();
+}
+
+/// Resource client for `/sdk/v1/players/:p/{pending-grants,grants,crates}`.
+class GrantsClient {
+  final KratyClient _client;
+
+  GrantsClient(this._client);
+
+  /// Pending grants for the active player. Empty list for unknown
+  /// players (not a 404). Pass `as:` to query another player
+  /// (server-side tooling only).
+  Future&lt;List&lt;Grant&gt;&gt; listPending({int? limit, String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final qs = limit != null ? '?limit=$limit' : '';
+    final env = await _client.request(
+      method: 'GET',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/pending-grants$qs',
+    );
+    return _data&lt;List&lt;Grant&gt;&gt;(env, (raw) {
+      if (raw is List) {
+        return raw
+            .whereType&lt;Map&lt;String, Object?&gt;&gt;()
+            .map((e) =&gt;Grant.fromJson(e.cast&lt;String, Object?&gt;()))
+            .toList();
+      }
+      return &lt;Grant&gt;[];
+    });
+  }
+
+  /// Grant items / currency / a crate to the ACTIVE player (self-only — the
+  /// player secret means you can only grant to yourself, never another
+  /// player). Requires the game's inventory management to be `permissive`,
+  /// else the server returns 403 `inventory_not_permissive`. The grant
+  /// auto-deposits into the player's holdings.
+  Future&lt;Grant&gt; grant(
+    List&lt;GrantEntryInput&gt; entries, {
+    String? kind,
+    String? expiresAt,
+    Map&lt;String, Object?&gt;? metadata,
+    String? idempotencyKey,
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/grants',
+      body: &lt;String, Object?&gt;{
+        'entries': entries.map((e) =&gt; e.toJson()).toList(),
+        if (kind != null) 'kind': kind,
+        if (expiresAt != null) 'expiresAt': expiresAt,
+        if (metadata != null) 'metadata': metadata,
+        if (idempotencyKey != null) 'idempotencyKey': idempotencyKey,
+      },
+    );
+    return _data&lt;Grant&gt;(env, (raw) {
+      if (raw is Map) return Grant.fromJson(raw.cast&lt;String, Object?&gt;());
+      return Grant.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// Flip a pending grant to claimed for the active player.
+  /// Idempotent: claiming an already-claimed grant returns the same
+  /// row.
+  Future&lt;Grant&gt; claim(String grantId, {String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/grants/${_enc(grantId)}/claim',
+      body: const &lt;String, Object?&gt;{},
+    );
+    return _data&lt;Grant&gt;(env, (raw) {
+      if (raw is Map) return Grant.fromJson(raw.cast&lt;String, Object?&gt;());
+      return Grant.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// Roll a crate for the active player. Idempotent on the crate id:
+  /// replays return the previously-rolled contents grant.
+  Future&lt;OpenCrateResponse&gt; open(String grantId, {String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/crates/${_enc(grantId)}/open',
+      body: const &lt;String, Object?&gt;{},
+    );
+    return _data&lt;OpenCrateResponse&gt;(env, (raw) {
+      if (raw is Map) return OpenCrateResponse.fromJson(raw.cast&lt;String, Object?&gt;());
+      return OpenCrateResponse(
+        crate: Grant.fromJson(const &lt;String, Object?&gt;{}),
+        contents: Grant.fromJson(const &lt;String, Object?&gt;{}),
+      );
+    });
+  }
+
+  /// Burn down the pending-grants queue in one call for the active
+  /// player: list everything pending, open every crate, claim every
+  /// reward, return a summary. Built for the "round complete"
+  /// reward-collection moment most games have.
+  ///
+  /// Errors per-grant are caught and surfaced in
+  /// [CollectAllResult.failures]; one bad grant doesn't abort the
+  /// whole sweep.
+  Future&lt;CollectAllResult&gt; collectAll({String? as}) async {
+    final pending = await listPending(as: as);
+    final opened = &lt;OpenCrateResponse&gt;[];
+    final claimed = &lt;Grant&gt;[];
+    final failures = &lt;CollectAllFailure&gt;[];
+    for (final g in pending) {
+      try {
+        if (g.kind == 'crate') {
+          opened.add(await open(g.id, as: as));
+        } else {
+          claimed.add(await claim(g.id, as: as));
+        }
+      } catch (err) {
+        failures.add(CollectAllFailure(grant: g, error: err));
+      }
+    }
+    return CollectAllResult(
+      processed: pending.length,
+      opened: opened,
+      claimed: claimed,
+      failures: failures,
+    );
+  }
+}
+
+/// One pending grant that `collectAll` couldn't process. The other
+/// grants in the same sweep still went through; inspect [error]
+/// and retry the individual operation.
+class CollectAllFailure {
+  final Grant grant;
+  final Object error;
+  const CollectAllFailure({required this.grant, required this.error});
+}
+
+/// Aggregate result of [GrantsClient.collectAll]. [processed] is the
+/// total pending count at the time of the call, and [opened] + [claimed]
+/// + [failures] sum to that.
+class CollectAllResult {
+  final int processed;
+  final List&lt;OpenCrateResponse&gt; opened;
+  final List&lt;Grant&gt; claimed;
+  final List&lt;CollectAllFailure&gt; failures;
+  const CollectAllResult({
+    required this.processed,
+    required this.opened,
+    required this.claimed,
+    required this.failures,
+  });
+
+  bool get hasFailures =&gt; failures.isNotEmpty;
+}
+
+/// Resource client for `/sdk/v1/players/:p/inventory(/...)`. Only
+/// surfaces meaningful data for games whose `settings.inventoryManagement`
+/// is `'platform'`; under studio-managed mode the lists come back
+/// empty (the studio's own backend holds the canonical state). The
+/// SDK doesn't expose grant or admin-credit endpoints; those are
+/// server-API only.
+/// Real-money purchase reporting.
+///
+/// Deliberately WRITE-ONLY. There is no client-side read of a player's
+/// spend total: it is a monetization signal worth keeping out of a
+/// shipped binary, and games that gate content on spend don't need it —
+/// the backend evaluates a `spend_at_least` unlock condition
+/// server-side and the event simply arrives locked or unlocked.
+class PurchasesClient {
+  final KratyClient _client;
+
+  PurchasesClient(this._client);
+
+  /// `POST /sdk/v1/players/:p/purchases`: record a real-money purchase
+  /// for the active player.
+  ///
+  /// Call it the moment your store plugin confirms the transaction.
+  /// Safe to call repeatedly for one [TrackPurchaseInput.transactionId]
+  /// — restores, retries after a timeout, and app relaunches all
+  /// collapse onto a single ledger row, and the result's
+  /// `deduplicated` flag tells you which happened.
+  ///
+  /// ```dart
+  /// final result = await kraty.trackPurchase(TrackPurchaseInput(
+  ///   // StoreKit 2 transactionId (Google Play: orderId); see canonicalTransactionId.
+  ///   transactionId: tx.purchaseID!,
+  ///   store: 'app_store',
+  ///   productId: 'gems_500',
+  ///   amountMinor: 499, // \$4.99 — minor units, as charged
+  ///   currency: 'USD',
+  ///   receipt: tx.verificationData.serverVerificationData,
+  ///   offerInstanceId: offer?.instanceId, // when bought from kraty.offers.list()
+  /// ));
+  /// // result.offer?.studioFulfils == true → deliver result.offer!.contents yourself
+  /// ```
+  ///
+  /// Throws [KratyApiError] with code `unknown_currency` if Kraty holds
+  /// no FX rate for the currency — a configuration gap, not a player
+  /// problem, so surface it in QA rather than retrying.
+  Future&lt;TrackPurchaseResult&gt; track(
+    TrackPurchaseInput input, {
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/purchases',
+      body: input.toJson(),
+    );
+    return _data&lt;TrackPurchaseResult&gt;(env, (raw) {
+      if (raw is Map) {
+        return TrackPurchaseResult.fromJson(raw.cast&lt;String, Object?&gt;());
+      }
+      return TrackPurchaseResult.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+}
+
+class InventoryClient {
+  final KratyClient _client;
+
+  InventoryClient(this._client);
+
+  /// `GET /sdk/v1/players/:p/inventory`: every item the player
+  /// currently holds (quantity &gt; 0). Newest-first ordering is not
+  /// guaranteed; sort client-side if you need it.
+  Future&lt;List&lt;PlayerItemHolding&gt;&gt; list({String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/inventory',
+    );
+    return _data&lt;List&lt;PlayerItemHolding&gt;&gt;(env, (raw) {
+      if (raw is Map) {
+        final items = raw['items'];
+        if (items is List) {
+          return items
+              .whereType&lt;Map&lt;String, Object?&gt;&gt;()
+              .map((e) =&gt; PlayerItemHolding.fromJson(e.cast&lt;String, Object?&gt;()))
+              .toList(growable: false);
+        }
+      }
+      return const &lt;PlayerItemHolding&gt;[];
+    });
+  }
+
+  /// `POST /sdk/v1/players/:p/inventory/:itemKey/consume`: atomic
+  /// decrement on the active player's inventory. Auto-stamped
+  /// idempotency key unless you provide one. Returns 409 (surfaced
+  /// as [KratyApiError] with code `conflict`) if the player doesn't
+  /// have enough of the item.
+  Future&lt;ConsumeItemResult&gt; consume(
+    String itemKey,
+    ConsumeItemInput input, {
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/inventory/${_enc(itemKey)}/consume',
+      body: input.toJson(),
+    );
+    return _data&lt;ConsumeItemResult&gt;(env, (raw) {
+      if (raw is Map) {
+        return ConsumeItemResult.fromJson(raw.cast&lt;String, Object?&gt;());
+      }
+      return ConsumeItemResult.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `GET /sdk/v1/players/:p/inventory/stream`: live subscription to
+  /// everything that touches this player's items, wallet, and grants —
+  /// whoever caused it. A reward granted from the dashboard, a currency
+  /// credited by the studio's backend, an event payout, and the client's
+  /// own consume all arrive here.
+  ///
+  /// Returns the raw handle; iterate `events` and call `cancel()` when
+  /// done. See [watch] for the callback form.
+  ///
+  /// Reconnects on its own by default ([autoReconnect]): after a server
+  /// `close`, a network drop, a busy 503 or [heartbeatTimeout] of silence
+  /// (default 40 s; [Duration.zero] turns the watchdog off), with jittered backoff capped at 15 s. No replay:
+  /// watch `connection` and re-read on `connected`. Only fatal errors land
+  /// on `errors`. Pass `autoReconnect: false` for the old single
+  /// connection (`errors` carries drops; re-call after a backoff). Treat
+  /// each event as "something changed, re-read this"; the REST reads stay
+  /// authoritative.
+  Future&lt;InventoryStream&gt; live({
+    String? as,
+    bool autoReconnect = true,
+    Duration heartbeatTimeout = const Duration(seconds: 40),
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    return openInventoryStream(
+      baseUrl: _client.baseUrlForStreaming,
+      externalPlayerId: externalPlayerId,
+      authHeader: _client.authHeaderForStreaming,
+      httpClient: _client.httpForStreaming,
+      playerSecret: _client.playerSecretForStreaming,
+      currentPlayerSecret: () =&gt; _client.playerSecretForStreaming,
+      sdkUserAgent: _client.sdkUserAgentForStreaming,
+      autoReconnect: autoReconnect,
+      heartbeatTimeout: heartbeatTimeout,
+    );
+  }
+
+  /// Callback form of [live]: the one-liner most games want.
+  ///
+  /// ```dart
+  /// final stop = await kraty.inventory.watch(
+  ///   (ev) {
+  ///     if (ev.kind == 'inventory_changed') refreshBackpack();
+  ///     if (ev.kind == 'grant_created') showRewardPopup(ev.data);
+  ///   },
+  ///   ignoreOwnWrites: true,
+  /// );
+  /// // later
+  /// await stop();
+  /// ```
+  ///
+  /// [ignoreOwnWrites] skips events the client itself caused, so a
+  /// `consume` doesn't bounce back as a refresh. [onError] receives
+  /// fatal errors (with [autoReconnect], the default) or transport
+  /// failures (without). [onConnection] receives `connected` /
+  /// `reconnecting` status changes. Returns a stop function; calling it
+  /// more than once is safe.
+  Future&lt;Future&lt;void&gt; Function()&gt; watch(
+    void Function(InventoryStreamEvent event) handler, {
+    bool ignoreOwnWrites = false,
+    void Function(Object error)? onError,
+    void Function(KratyConnectionEvent event)? onConnection,
+    bool autoReconnect = true,
+    String? as,
+  }) async {
+    final stream = await live(as: as, autoReconnect: autoReconnect);
+    if (onConnection != null) stream.connection.listen(onConnection);
+    stream.events.listen(
+      (ev) {
+        if (ignoreOwnWrites &amp;&amp; ev.isOwnWrite) return;
+        handler(ev);
+      },
+      onError: (Object err) =&gt; onError?.call(err),
+      cancelOnError: false,
+    );
+    if (onError != null) {
+      stream.errors.listen(onError);
+    }
+    return stream.cancel;
+  }
+}
+
+/// Resource client for `/sdk/v1/players/:p/daily-login`: the game's daily
+/// login calendar. Read-only; the server pays each day's reward on the
+/// player's first session of that UTC day (a call on first contact or after
+/// 30 minutes of silence opens one), as a grant with
+/// `sourceKind == 'daily_login'`.
+class DailyLoginClient {
+  final KratyClient _client;
+
+  DailyLoginClient(this._client);
+
+  /// `GET /sdk/v1/players/:p/daily-login`. Returns null when the game has no
+  /// calendar or it is switched off for this key's environment. When this
+  /// request is the one that opens a session, today is already paid in the
+  /// result; a player still in a session from before midnight UTC is paid on
+  /// their next one.
+  Future&lt;DailyLogin?&gt; read({String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/daily-login',
+    );
+    return _data&lt;DailyLogin?&gt;(
+      env,
+      (raw) =&gt; raw is Map ? DailyLogin.fromJson(raw.cast&lt;String, Object?&gt;()) : null,
+    );
+  }
+}
+
+/// Resource client for `/sdk/v1/players/:p/offers` (docs/26): real-money
+/// offers such as starter packs, bundles and chains.
+///
+/// The flow: [list] what to show; [markShown] when an offer is actually on
+/// screen (that starts a "from first shown" timer, so don't call it for
+/// offers you only prefetched); sell `offer.current.skus[yourStore]`; then
+/// report the store transaction with `kraty.trackPurchase(TrackPurchaseInput(
+/// …, offerInstanceId: offer.instanceId))`. When the result's
+/// `offer.studioFulfils` is true (the offer is set to game delivers; by default Kraty delivers, so do not grant it too), deliver `offer.contents`
+/// yourself, as you fulfil any IAP.
+class OffersClient {
+  final KratyClient _client;
+
+  OffersClient(this._client);
+
+  Future&lt;String&gt; _base(String? as) async =&gt;
+      '/sdk/v1/players/${_enc(await _resolvePlayerId(_client, as))}/offers';
+
+  static JsonMap _map(Object? raw) =&gt; raw is Map ? raw.cast&lt;String, Object?&gt;() : const &lt;String, Object?&gt;{};
+
+  // The client stamps a generated key into a body that has none.
+  static JsonMap _keyBody(String? idempotencyKey) =&gt; &lt;String, Object?&gt;{
+        if (idempotencyKey != null &amp;&amp; idempotencyKey.isNotEmpty) 'idempotencyKey': idempotencyKey,
+      };
+
+  /// `GET /sdk/v1/players/:p/offers`: the offers to show now, highest
+  /// priority first ([limit] ≤ 20, default 10). [level] is the player's
+  /// current level, for offers that trigger on reaching one. Listing is not
+  /// an impression.
+  Future&lt;List&lt;Offer&gt;&gt; list({int? limit, int? level, String? as}) async {
+    final parts = &lt;String&gt;[
+      if (limit != null) 'limit=$limit',
+      if (level != null) 'level=$level',
+    ];
+    final qs = parts.isEmpty ? '' : '?${parts.join('&amp;')}';
+    final env = await _client.request(method: 'GET', path: '${await _base(as)}$qs');
+    return _data&lt;List&lt;Offer&gt;&gt;(env, (raw) {
+      if (raw is! List) return const &lt;Offer&gt;[];
+      return raw
+          .whereType&lt;Map&lt;Object?, Object?&gt;&gt;()
+          .map((o) =&gt; Offer.fromJson(o.cast&lt;String, Object?&gt;()))
+          .toList(growable: false);
+    });
+  }
+
+  /// `POST …/offers/:instanceId/impression`: the offer is on screen now.
+  /// Idempotent (the SDK generates the key when you don't pass one).
+  /// `capped` is true when the offer's impression cap refused it.
+  Future&lt;OfferImpressionResult&gt; markShown(String instanceId, {String? idempotencyKey, String? as}) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/${_enc(instanceId)}/impression',
+      body: _keyBody(idempotencyKey),
+    );
+    return _data(env, (raw) =&gt; OfferImpressionResult.fromJson(_map(raw)));
+  }
+
+  /// `POST …/offers/:instanceId/dismiss`: the player closed the offer without
+  /// buying. Answers the offer after the dismiss.
+  Future&lt;Offer&gt; dismiss(String instanceId, {String? idempotencyKey, String? as}) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/${_enc(instanceId)}/dismiss',
+      body: _keyBody(idempotencyKey),
+    );
+    return _data(env, (raw) =&gt; Offer.fromJson(_map(raw)));
+  }
+
+  /// `POST …/offers/triggers`: report a fail, a depleted resource or a level
+  /// ([OfferTriggerInput.failEvent], [OfferTriggerInput.resourceDepleted],
+  /// [OfferTriggerInput.levelReached]) so the offers listening to it arm.
+  /// Answers the newly armed offers that can be shown now (empty when none
+  /// did; they also show up on the next [list]). [playerContext] feeds offer
+  /// eligibility. Idempotent (the SDK generates the key when you don't pass
+  /// one). Win-back offers need no call: they arm when a session opens after
+  /// a break.
+  Future&lt;OfferTriggerResult&gt; trigger(
+    OfferTriggerInput input, {
+    JsonMap? playerContext,
+    String? idempotencyKey,
+    String? as,
+  }) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/triggers',
+      body: &lt;String, Object?&gt;{
+        ..._keyBody(idempotencyKey),
+        'trigger': input.toJson(),
+        if (playerContext != null) 'playerContext': playerContext,
+      },
+    );
+    return _data(env, (raw) =&gt; OfferTriggerResult.fromJson(_map(raw)));
+  }
+
+  /// `POST …/offers/:instanceId/claim`: claim the current free tier of a
+  /// chain offer (`offer.current.isFree`). Pass the [tier] the player tapped
+  /// (`offer.tier`). No store, never revenue. Answers the claim and the
+  /// offer after it (the next tier, or `completed`). When
+  /// `claim.studioFulfils` is true (the offer is set to game delivers; by default Kraty delivers, so do not grant it too), deliver `claim.contents`
+  /// yourself. Deliver each claim from one path only (this response or the
+  /// `offer.tier_claimed` webhook), and de-duplicate on `claim.claimId`.
+  /// Idempotent (the SDK generates the key when you don't pass
+  /// one). A refusal throws [KratyApiError] with `code == 'conflict'` and
+  /// `details['reason']` (`tier_changed`, `tier_not_free`, `offer_closed`);
+  /// `details['offer']` is the offer now.
+  Future&lt;OfferClaimResult&gt; claim(
+    String instanceId, {
+    required int tier,
+    String? idempotencyKey,
+    String? as,
+  }) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/${_enc(instanceId)}/claim',
+      body: &lt;String, Object?&gt;{
+        ..._keyBody(idempotencyKey),
+        'tier': tier,
+      },
+    );
+    return _data(env, (raw) =&gt; OfferClaimResult.fromJson(_map(raw)));
+  }
+}
+
+/// Resource client for guilds (docs/25): `/sdk/v1/players/:p/guild*` and
+/// `/guilds*`. One guild per player, up to 50 members, leader / co-leader /
+/// member roles. Every call acts as the active player (or [as]). Build
+/// screens from [config]: it carries the unlock gate, the create cost, what
+/// each role may do, and the help and score settings.
+class GuildsClient {
+  final KratyClient _client;
+
+  GuildsClient(this._client);
+
+  Future&lt;String&gt; _base(String? as) async =&gt;
+      '/sdk/v1/players/${_enc(await _resolvePlayerId(_client, as))}';
+
+  static String _query(Map&lt;String, String?&gt; params) {
+    final parts = &lt;String&gt;[
+      for (final e in params.entries)
+        if (e.value != null &amp;&amp; e.value!.isNotEmpty) '${e.key}=${Uri.encodeQueryComponent(e.value!)}',
+    ];
+    return parts.isEmpty ? '' : '?${parts.join('&amp;')}';
+  }
+
+  static JsonMap _map(Object? raw) =&gt; raw is Map ? raw.cast&lt;String, Object?&gt;() : const &lt;String, Object?&gt;{};
+
+  static List&lt;T&gt; _list&lt;T&gt;(Object? raw, String key, T Function(JsonMap) decode) {
+    final v = _map(raw)[key];
+    if (v is! List) return &lt;T&gt;[];
+    return v
+        .whereType&lt;Map&lt;String, Object?&gt;&gt;()
+        .map((e) =&gt; decode(e.cast&lt;String, Object?&gt;()))
+        .toList(growable: false);
+  }
+
+  /// `GET /guilds/config`: the game's guild rules for this player.
+  Future&lt;GuildClientConfig&gt; config({String? as}) async {
+    final env = await _client.request(method: 'GET', path: '${await _base(as)}/guilds/config');
+    return _data(env, (raw) =&gt; GuildClientConfig.fromJson(_map(raw)));
+  }
+
+  /// `GET /guild`: your guild, role, permissions and week; null when guildless.
+  Future&lt;MyGuild?&gt; mine({String? as}) async {
+    final env = await _client.request(method: 'GET', path: '${await _base(as)}/guild');
+    return _data&lt;MyGuild?&gt;(env, (raw) =&gt; raw is Map ? MyGuild.fromJson(_map(raw)) : null);
+  }
+
+  /// `GET /guilds/:guildId`: any guild of this game with its roster.
+  Future&lt;GuildDetail&gt; get(String guildId, {String? as}) async {
+    final env = await _client.request(method: 'GET', path: '${await _base(as)}/guilds/${_enc(guildId)}');
+    return _data(env, (raw) =&gt; GuildDetail.fromJson(_map(raw)));
+  }
+
+  /// `GET /guilds?q=`: name search, prefix matches first (one page; see [searchPage]).
+  Future&lt;List&lt;GuildSummary&gt;&gt; search(String query, {String? country, int? limit, int? offset, String? as}) async {
+    return (await searchPage(query, country: country, limit: limit, offset: offset, as: as)).guilds;
+  }
+
+  /// `GET /guilds?q=&amp;offset=`: one page of name search (`limit` default 20,
+  /// max 50) and the [GuildSearchPage.nextOffset] for the next (null at the end).
+  Future&lt;GuildSearchPage&gt; searchPage(String query,
+      {String? country, int? limit, int? offset, String? as}) async {
+    final qs = _query({
+      'q': query,
+      'country': country,
+      'limit': limit?.toString(),
+      'offset': (offset ?? 0) &gt; 0 ? offset.toString() : null,
+    });
+    final env = await _client.request(method: 'GET', path: '${await _base(as)}/guilds$qs');
+    return _data(env, (raw) {
+      final map = _map(raw);
+      final next = map['nextOffset'];
+      return GuildSearchPage(
+        guilds: _list(raw, 'guilds', GuildSummary.fromJson),
+        nextOffset: next is num ? next.toInt() : null,
+      );
+    });
+  }
+
+  /// `GET /guilds/recommended`: guilds with room, friends' guilds first
+  /// ([GuildSummary.friendCount]); varies between calls.
+  Future&lt;List&lt;GuildSummary&gt;&gt; recommended({String? country, int? limit, String? as}) async {
+    final qs = _query({'country': country, 'limit': limit?.toString()});
+    final env = await _client.request(method: 'GET', path: '${await _base(as)}/guilds/recommended$qs');
+    return _data(env, (raw) =&gt; _list(raw, 'guilds', GuildSummary.fromJson));
+  }
+
+  /// `POST /guilds`: found a guild (gate checked, cost charged atomically);
+  /// you lead it. Only non-null fields are sent.
+  Future&lt;MyGuild&gt; create({
+    required String name,
+    String? description,
+    String? badge,
+    String? country,
+    String? joinType,
+    Map&lt;String, Object?&gt;? metadata,
+    String? as,
+  }) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/guilds',
+      body: &lt;String, Object?&gt;{
+        'name': name,
+        if (description != null) 'description': description,
+        if (badge != null) 'badge': badge,
+        if (country != null) 'country': country,
+        if (joinType != null) 'joinType': joinType,
+        if (metadata != null) 'metadata': metadata,
+      },
+    );
+    return _data(env, (raw) =&gt; MyGuild.fromJson(_map(raw)));
+  }
+
+  /// `POST /guilds/:guildId/join`: join an open guild, or ask to join a request guild.
+  Future&lt;GuildJoinResult&gt; join(String guildId, {String? message, String? as}) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/guilds/${_enc(guildId)}/join',
+      body: &lt;String, Object?&gt;{if (message != null) 'message': message},
+    );
+    return _data(env, (raw) =&gt; GuildJoinResult.fromJson(_map(raw)));
+  }
+
+  /// `GET /guild-requests`: your pending join requests.
+  Future&lt;List&lt;GuildJoinRequest&gt;&gt; myRequests({String? as}) async {
+    final env = await _client.request(method: 'GET', path: '${await _base(as)}/guild-requests');
+    return _data(env, (raw) =&gt; _list(raw, 'requests', GuildJoinRequest.fromJson));
+  }
+
+  /// `DELETE /guild-requests/:requestId`: withdraw one of your join requests.
+  Future&lt;void&gt; cancelRequest(String requestId, {String? as}) async {
+    await _client.request(method: 'DELETE', path: '${await _base(as)}/guild-requests/${_enc(requestId)}');
+  }
+
+  /// `PATCH /guild`: edit the profile (needs `edit_profile`). Only non-null fields are sent.
+  Future&lt;GuildDetail&gt; updateProfile({
+    String? name,
+    String? description,
+    String? badge,
+    String? country,
+    String? joinType,
+    Map&lt;String, Object?&gt;? metadata,
+    String? as,
+  }) async {
+    final env = await _client.request(
+      method: 'PATCH',
+      path: '${await _base(as)}/guild',
+      body: &lt;String, Object?&gt;{
+        if (name != null) 'name': name,
+        if (description != null) 'description': description,
+        if (badge != null) 'badge': badge,
+        if (country != null) 'country': country,
+        if (joinType != null) 'joinType': joinType,
+        if (metadata != null) 'metadata': metadata,
+      },
+    );
+    return _data(env, (raw) =&gt; GuildDetail.fromJson(_map(raw)));
+  }
+
+  /// `POST /guild/leave`: a leaving leader hands over; the last one out disbands.
+  Future&lt;GuildLeaveResult&gt; leave({String? as}) async {
+    final env = await _client.request(method: 'POST', path: '${await _base(as)}/guild/leave');
+    return _data(env, (raw) =&gt; GuildLeaveResult.fromJson(_map(raw)));
+  }
+
+  /// `GET /guild/requests`: your guild's pending join requests (needs `accept_requests`).
+  Future&lt;List&lt;GuildJoinRequest&gt;&gt; requests({String? as}) async {
+    final env = await _client.request(method: 'GET', path: '${await _base(as)}/guild/requests');
+    return _data(env, (raw) =&gt; _list(raw, 'requests', GuildJoinRequest.fromJson));
+  }
+
+  /// `POST /guild/requests/:requestId/accept`: the player joins (checks re-run now).
+  Future&lt;GuildDetail&gt; acceptRequest(String requestId, {String? as}) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/guild/requests/${_enc(requestId)}/accept',
+    );
+    return _data(env, (raw) =&gt; GuildDetail.fromJson(_map(raw)));
+  }
+
+  /// `POST /guild/requests/:requestId/decline`.
+  Future&lt;void&gt; declineRequest(String requestId, {String? as}) async {
+    await _client.request(method: 'POST', path: '${await _base(as)}/guild/requests/${_enc(requestId)}/decline');
+  }
+
+  /// `POST /guild/members/:id/kick`: they can't rejoin this guild for the configured block.
+  Future&lt;GuildDetail&gt; kick(String memberExternalId, {String? as}) =&gt; _memberAction('kick', memberExternalId, as);
+
+  /// `POST /guild/members/:id/promote`: member → co-leader.
+  Future&lt;GuildDetail&gt; promote(String memberExternalId, {String? as}) =&gt;
+      _memberAction('promote', memberExternalId, as);
+
+  /// `POST /guild/members/:id/demote`: co-leader → member.
+  Future&lt;GuildDetail&gt; demote(String memberExternalId, {String? as}) =&gt;
+      _memberAction('demote', memberExternalId, as);
+
+  Future&lt;GuildDetail&gt; _memberAction(String verb, String memberExternalId, String? as) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/guild/members/${_enc(memberExternalId)}/$verb',
+    );
+    return _data(env, (raw) =&gt; GuildDetail.fromJson(_map(raw)));
+  }
+
+  /// `POST /guild/leader`: hand leadership to a member (leader only; you become co-leader).
+  Future&lt;GuildDetail&gt; transferLeadership(String memberExternalId, {String? as}) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/guild/leader',
+      body: &lt;String, Object?&gt;{'externalPlayerId': memberExternalId},
+    );
+    return _data(env, (raw) =&gt; GuildDetail.fromJson(_map(raw)));
+  }
+
+  /// `GET /guild/help`: open help requests, yours, and your weekly helps counter.
+  Future&lt;GuildHelpOverview&gt; help({String? as}) async {
+    final env = await _client.request(method: 'GET', path: '${await _base(as)}/guild/help');
+    return _data(env, (raw) =&gt; GuildHelpOverview.fromJson(_map(raw)));
+  }
+
+  /// `POST /guild/help`: ask guildmates for a resource on the game's help list.
+  Future&lt;GuildHelpRequest&gt; requestHelp({
+    required String type,
+    required String resourceKey,
+    required int amount,
+    String? as,
+  }) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/guild/help',
+      body: &lt;String, Object?&gt;{'type': type, 'resourceKey': resourceKey, 'amount': amount},
+    );
+    return _data(env, (raw) =&gt; GuildHelpRequest.fromJson(_map(raw)));
+  }
+
+  /// `POST /guild/help/:requestId/donate`: delivered to them as a grant; may reward you.
+  Future&lt;GuildHelpDonation&gt; donate(String requestId, {int? amount, String? as}) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/guild/help/${_enc(requestId)}/donate',
+      body: &lt;String, Object?&gt;{if (amount != null) 'amount': amount},
+    );
+    return _data(env, (raw) =&gt; GuildHelpDonation.fromJson(_map(raw)));
+  }
+
+  /// `DELETE /guild/help/:requestId`: withdraw your own help request.
+  Future&lt;GuildHelpRequest&gt; cancelHelp(String requestId, {String? as}) async {
+    final env = await _client.request(method: 'DELETE', path: '${await _base(as)}/guild/help/${_enc(requestId)}');
+    return _data(env, (raw) =&gt; GuildHelpRequest.fromJson(_map(raw)));
+  }
+}
+
+/// A random RFC 4122 v4 UUID for `clientMessageId`. Hand-rolled on
+/// `Random.secure()` so the SDK doesn't take a `uuid` dependency.
+String _uuidV4() {
+  final rng = math.Random.secure();
+  final b = List&lt;int&gt;.generate(16, (_) =&gt; rng.nextInt(256));
+  b[6] = (b[6] &amp; 0x0f) | 0x40;
+  b[8] = (b[8] &amp; 0x3f) | 0x80;
+  final hex = b.map((x) =&gt; x.toRadixString(16).padLeft(2, '0')).join();
+  return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-'
+      '${hex.substring(16, 20)}-${hex.substring(20)}';
+}
+
+JsonMap _jsonMap(Object? raw) =&gt; raw is Map ? raw.cast&lt;String, Object?&gt;() : const &lt;String, Object?&gt;{};
+
+List&lt;T&gt; _jsonList&lt;T&gt;(Object? raw, String key, T Function(JsonMap) decode) {
+  final v = _jsonMap(raw)[key];
+  if (v is! List) return &lt;T&gt;[];
+  return v
+      .whereType&lt;Map&lt;Object?, Object?&gt;&gt;()
+      .map((e) =&gt; decode(e.cast&lt;String, Object?&gt;()))
+      .toList(growable: false);
+}
+
+/// Resource client for chat (docs/26): `/sdk/v1/players/:p/chat/*`. Direct
+/// messages, player-made groups, guild chat and the game's public channels.
+/// Every call acts as the active player (or [as]).
+///
+/// Chat is a paid add-on configured per game: when it's off every call
+/// throws `KratyApiError` with `isChatDisabled`. Build screens from
+/// [config]: it carries which kinds are on, the channels, message rules,
+/// the player's preferences and their moderation standing.
+///
+/// When [KratyClientOptions.chatProfanityFilter] is set, every call here
+/// (and [live]) sends `X-Kraty-Chat-Filter: on|off`.
+class ChatClient {
+  final KratyClient _client;
+
+  ChatClient(this._client);
+
+  /// The server's default per-kind cooldowns, used until [config] is read.
+  static const Map&lt;String, int&gt; _defaultKindCooldowns = {'direct': 1, 'group': 1, 'guild': 2, 'channel': 15};
+
+  /// Per-kind cooldowns from [config].
+  final Map&lt;String, int&gt; _kindCooldowns = Map&lt;String, int&gt;.of(_defaultKindCooldowns);
+
+  /// Kind and channel cooldown of every conversation the SDK has returned.
+  final Map&lt;String, ({String kind, int? channelCooldown})&gt; _known = {};
+
+  /// conversationId → when the player may send there again.
+  final Map&lt;String, DateTime&gt; _readyAt = {};
+
+  /// conversationId → tail of its outbox queue (one send in flight per
+  /// conversation, FIFO).
+  final Map&lt;String, Future&lt;void&gt;&gt; _outboxTails = {};
+
+  final math.Random _jitter = math.Random();
+
+  ChatConversation _observe(ChatConversation c) {
+    _known[c.conversationId] = (kind: c.kind, channelCooldown: c.channel?.cooldownSeconds);
+    return c;
+  }
+
+  void _holdUntil(String conversationId, DateTime at) {
+    final current = _readyAt[conversationId];
+    if (current == null || at.isAfter(current)) _readyAt[conversationId] = at;
+  }
+
+  int _cooldownOf(String conversationId) {
+    final k = _known[conversationId];
+    if (k == null) return 0;
+    return k.channelCooldown ?? _kindCooldowns[k.kind] ?? 0;
+  }
+
+  /// Seconds until the player may send in this conversation again (0 when
+  /// free): from the conversation's cooldown after a successful send, and
+  /// from a `chat_slow_mode` 429's `retryAfterSeconds` (duplicate and
+  /// rate-limit refusals don't hold the conversation). Use it to grey out
+  /// the send button.
+  /// Knows a conversation's cooldown once the SDK has returned it
+  /// ([conversations], [conversation], [channel], …) and [config].
+  int cooldownRemaining(String conversationId) {
+    final at = _readyAt[conversationId];
+    if (at == null) return 0;
+    final left = at.difference(DateTime.now()).inMilliseconds;
+    if (left &lt;= 0) {
+      _readyAt.remove(conversationId);
+      return 0;
+    }
+    return (left / 1000).ceil();
+  }
+
+  /// Runs [job] after every earlier job of [conversationId]'s outbox.
+  Future&lt;T&gt; _enqueue&lt;T&gt;(String conversationId, Future&lt;T&gt; Function() job) {
+    final prev = _outboxTails[conversationId] ?? Future&lt;void&gt;.value();
+    final result = Completer&lt;T&gt;();
+    late final Future&lt;void&gt; tail;
+    tail = prev.then((_) async {
+      try {
+        result.complete(await job());
+      } catch (err, stack) {
+        result.completeError(err, stack);
+      }
+    }).whenComplete(() {
+      if (identical(_outboxTails[conversationId], tail)) _outboxTails.remove(conversationId);
+    });
+    _outboxTails[conversationId] = tail;
+    return result.future;
+  }
+
+  /// At the head of the queue: with the conversation in cooldown, fail
+  /// locally (no request) or, with [wait], hold until it ends. Returns the
+  /// time spent waiting (it doesn't count against the outbox timeout).
+  Future&lt;Duration&gt; _awaitCooldown(String conversationId, bool wait) async {
+    var paused = Duration.zero;
+    while (true) {
+      final at = _readyAt[conversationId];
+      final left = at == null ? Duration.zero : at.difference(DateTime.now());
+      if (left &lt;= Duration.zero) return paused;
+      if (!wait) {
+        final seconds = (left.inMilliseconds / 1000).ceil();
+        throw KratyApiError(
+          status: 429,
+          code: KratyErrorCode.chatSlowMode,
+          message: 'wait ${seconds}s before sending here again',
+          details: &lt;String, Object?&gt;{'retryAfterSeconds': seconds, 'local': true},
+        );
+      }
+      final sw = Stopwatch()..start();
+      await Future&lt;void&gt;.delayed(left);
+      paused += sw.elapsed;
+    }
+  }
+
+  /// Outbox backoff: 500 ms · 2^(n-1) · a random factor in [0.5, 1],
+  /// capped at 10 s.
+  Duration _outboxBackoff(int attempt) {
+    final base = 500 * math.pow(2, math.min(attempt - 1, 10));
+    final ms = math.min(10000, base * (0.5 + _jitter.nextDouble() * 0.5));
+    return Duration(milliseconds: ms.round());
+  }
+
+  static String _fmt(Duration d) =&gt;
+      d.inMilliseconds % 1000 == 0 ? '${d.inSeconds}s' : '${d.inMilliseconds}ms';
+
+  /// A send / edit through the outbox: ONE request per try (the client's
+  /// generic retry loop is bypassed), the same body every time. Network
+  /// errors, timeouts and 5xx (a busy 503 especially) are retried after
+  /// `Retry-After` / `details.retryAfterSeconds`, else jittered backoff,
+  /// until [KratyClientOptions.chatOutboxTimeout] runs out
+  /// ([KratyChatNotSentError]). A 429 or any other 4xx surfaces at once
+  /// (a retried refusal is another spam strike). Only a `chat_slow_mode`
+  /// 429 feeds [cooldownRemaining]: a `chat_duplicate_message` wait is for
+  /// that text only and `chat_rate_limited` is per player, so neither holds
+  /// the conversation.
+  Future&lt;JsonMap&gt; _deliver(
+    String method,
+    String path,
+    String conversationId,
+    Object body, {
+    required String? clientMessageId,
+    required Duration Function() elapsed,
+    required Future&lt;ChatMessage&gt; Function() resend,
+  }) async {
+    final budget = _client.chatOutboxTimeout;
+    var attempt = 0;
+    while (true) {
+      Object lastError;
+      Duration? wait;
+      try {
+        return await _client.request(
+          method: method,
+          path: path,
+          body: body,
+          headers: _client.chatFilterHeaders,
+          retryOn429: false,
+          attempts: 1,
+        );
+      } on KratyApiError catch (err) {
+        if (!isTransientKratyError(err)) {
+          final hold = err.isChatSlowMode ? err.retryAfter : null;
+          if (hold != null) _holdUntil(conversationId, DateTime.now().add(hold));
+          rethrow;
+        }
+        lastError = err;
+        wait = err.retryAfter;
+      } on KratyNetworkError catch (err) {
+        lastError = err;
+      }
+      attempt++;
+      final delay = wait ?? _outboxBackoff(attempt);
+      if (elapsed() + delay &gt;= budget) {
+        throw KratyChatNotSentError(
+          'chat ${clientMessageId == null ? 'edit' : 'message'} not sent within ${_fmt(budget)}: $lastError',
+          conversationId: conversationId,
+          clientMessageId: clientMessageId,
+          lastError: lastError,
+          resend: resend,
+        );
+      }
+      await Future&lt;void&gt;.delayed(delay);
+    }
+  }
+
+  Future&lt;String&gt; _base(String? as) async =&gt;
+      '/sdk/v1/players/${_enc(await _resolvePlayerId(_client, as))}/chat';
+
+  String _conv(String base, String conversationId) =&gt; '$base/conversations/${_enc(conversationId)}';
+
+  Future&lt;JsonMap&gt; _call(String method, String path, {Object? body}) =&gt; _client.request(
+        method: method,
+        path: path,
+        body: body,
+        headers: _client.chatFilterHeaders,
+      );
+
+  Future&lt;ChatConversation&gt; _conversation(String method, String path, {Object? body}) async {
+    final env = await _call(method, path, body: body);
+    return _observe(_data(env, (raw) =&gt; ChatConversation.fromJson(_jsonMap(raw))));
+  }
+
+  /// `GET /chat/config`: the game's chat rules, the player's preferences
+  /// and their moderation standing.
+  Future&lt;ChatClientConfig&gt; config({String? as}) async {
+    final env = await _call('GET', '${await _base(as)}/config');
+    final cfg = _data(env, (raw) =&gt; ChatClientConfig.fromJson(_jsonMap(raw)));
+    cfg.kinds.forEach((kind, k) {
+      if (k.settings['cooldownSeconds'] is num) _kindCooldowns[kind] = k.cooldownSeconds;
+    });
+    return cfg;
+  }
+
+  /// `GET /chat/preferences`: the player's saved filter choice and DM policy.
+  Future&lt;ChatPreferences&gt; preferences({String? as}) async {
+    final env = await _call('GET', '${await _base(as)}/preferences');
+    return _data(env, (raw) =&gt; ChatPreferences.fromJson(_jsonMap(raw)));
+  }
+
+  /// `PUT /chat/preferences`: save the player's choices. Only the fields you
+  /// pass change. [profanityFilter] true / false sets their filter choice;
+  /// [resetProfanityFilter] clears it back to each kind's default.
+  /// [allowDirectFrom] is `everyone`, `friends` or `nobody`.
+  Future&lt;ChatPreferences&gt; setPreferences({
+    bool? profanityFilter,
+    bool resetProfanityFilter = false,
+    String? allowDirectFrom,
+    String? as,
+  }) async {
+    final env = await _call('PUT', '${await _base(as)}/preferences', body: &lt;String, Object?&gt;{
+      if (resetProfanityFilter)
+        'profanityFilter': null
+      else if (profanityFilter != null)
+        'profanityFilter': profanityFilter,
+      if (allowDirectFrom != null) 'allowDirectFrom': allowDirectFrom,
+    });
+    return _data(env, (raw) =&gt; ChatPreferences.fromJson(_jsonMap(raw)));
+  }
+
+  /// `GET /chat/conversations`: the inbox, most recent activity first.
+  /// [kind] narrows it to one kind; page with [limit] (default 30, max 100)
+  /// and the returned [ChatConversationPage.nextOffset].
+  Future&lt;ChatConversationPage&gt; conversations({String? kind, int? limit, int? offset, String? as}) async {
+    final qs = GuildsClient._query({
+      'kind': kind,
+      'limit': limit?.toString(),
+      'offset': (offset ?? 0) &gt; 0 ? offset.toString() : null,
+    });
+    final env = await _call('GET', '${await _base(as)}/conversations$qs');
+    final page = _data(env, (raw) =&gt; ChatConversationPage.fromJson(_jsonMap(raw)));
+    page.conversations.forEach(_observe);
+    return page;
+  }
+
+  /// `GET /chat/unread`: unread totals across the inbox (the badge).
+  Future&lt;ChatUnread&gt; unread({String? as}) async {
+    final env = await _call('GET', '${await _base(as)}/unread');
+    return _data(env, (raw) =&gt; ChatUnread.fromJson(_jsonMap(raw)));
+  }
+
+  /// `GET /chat/conversations/:id`: one conversation, with
+  /// [ChatConversation.members] for groups.
+  Future&lt;ChatConversation&gt; conversation(String conversationId, {String? as}) async =&gt;
+      _conversation('GET', _conv(await _base(as), conversationId));
+
+  /// `POST /chat/direct`: open (or reopen) the direct conversation with a
+  /// player, by [externalPlayerId] or [friendCode] (exactly one).
+  Future&lt;ChatConversation&gt; openDirect({String? externalPlayerId, String? friendCode, String? as}) async {
+    if ((externalPlayerId == null) == (friendCode == null)) {
+      throw ArgumentError('openDirect: pass exactly one of externalPlayerId or friendCode');
+    }
+    return _conversation('POST', '${await _base(as)}/direct', body: &lt;String, Object?&gt;{
+      if (externalPlayerId != null) 'externalPlayerId': externalPlayerId,
+      if (friendCode != null) 'friendCode': friendCode,
+    });
+  }
+
+  /// `POST /chat/groups`: create a group; you own it. [externalPlayerIds]
+  /// are added with you (subject to the game's invite policy).
+  Future&lt;ChatConversation&gt; createGroup({
+    required String title,
+    List&lt;String&gt;? externalPlayerIds,
+    Map&lt;String, Object?&gt;? metadata,
+    String? as,
+  }) async =&gt;
+      _conversation('POST', '${await _base(as)}/groups', body: &lt;String, Object?&gt;{
+        'title': title,
+        if (externalPlayerIds != null) 'externalPlayerIds': externalPlayerIds,
+        if (metadata != null) 'metadata': metadata,
+      });
+
+  /// `PATCH /chat/conversations/:id`: rename a group or replace its
+  /// metadata (owner / admin). Only non-null fields are sent.
+  Future&lt;ChatConversation&gt; updateGroup(
+    String conversationId, {
+    String? title,
+    Map&lt;String, Object?&gt;? metadata,
+    String? as,
+  }) async =&gt;
+      _conversation('PATCH', _conv(await _base(as), conversationId), body: &lt;String, Object?&gt;{
+        if (title != null) 'title': title,
+        if (metadata != null) 'metadata': metadata,
+      });
+
+  /// `POST /chat/conversations/:id/members`: add players to a group.
+  Future&lt;ChatConversation&gt; addMembers(String conversationId, List&lt;String&gt; externalPlayerIds, {String? as}) async =&gt;
+      _conversation('POST', '${_conv(await _base(as), conversationId)}/members',
+          body: &lt;String, Object?&gt;{'externalPlayerIds': externalPlayerIds});
+
+  /// `DELETE /chat/conversations/:id/members/:externalPlayerId`: remove a
+  /// member from a group (owner / admin).
+  Future&lt;void&gt; removeMember(String conversationId, String externalPlayerId, {String? as}) async {
+    await _call('DELETE', '${_conv(await _base(as), conversationId)}/members/${_enc(externalPlayerId)}');
+  }
+
+  /// `PUT /chat/conversations/:id/members/:externalPlayerId/role`: set a
+  /// group member's [role] (`owner`, `admin` or `member`).
+  Future&lt;ChatConversation&gt; setRole(String conversationId, String externalPlayerId, String role, {String? as}) async =&gt;
+      _conversation('PUT', '${_conv(await _base(as), conversationId)}/members/${_enc(externalPlayerId)}/role',
+          body: &lt;String, Object?&gt;{'role': role});
+
+  /// `POST /chat/conversations/:id/leave`: leave a group.
+  Future&lt;void&gt; leave(String conversationId, {String? as}) async {
+    await _call('POST', '${_conv(await _base(as), conversationId)}/leave');
+  }
+
+  /// `GET /chat/guild`: your guild's conversation. Throws `conflict` (409)
+  /// when you aren't in a guild.
+  Future&lt;ChatConversation&gt; guild({String? as}) async =&gt; _conversation('GET', '${await _base(as)}/guild');
+
+  /// `GET /chat/channels`: the game's public channels.
+  Future&lt;List&lt;ChatConversation&gt;&gt; channels({String? as}) async {
+    final env = await _call('GET', '${await _base(as)}/channels');
+    return _data(env, (raw) =&gt; _jsonList(raw, 'channels', ChatConversation.fromJson)).map(_observe).toList();
+  }
+
+  /// `GET /chat/channels/:key`: one public channel's conversation.
+  Future&lt;ChatConversation&gt; channel(String key, {String? as}) async =&gt;
+      _conversation('GET', '${await _base(as)}/channels/${_enc(key)}');
+
+  /// `GET /chat/conversations/:id/messages`: a page of messages, oldest →
+  /// newest. No cursor = the latest page; [before] pages back in history;
+  /// [after] catches up (pass the last `seq` you saw). Not both.
+  Future&lt;ChatMessagePage&gt; messages(
+    String conversationId, {
+    int? before,
+    int? after,
+    int? limit,
+    String? as,
+  }) async {
+    if (before != null &amp;&amp; after != null) {
+      throw ArgumentError('messages: pass before or after, not both');
+    }
+    final qs = GuildsClient._query({
+      'before': before?.toString(),
+      'after': after?.toString(),
+      'limit': limit?.toString(),
+    });
+    final env = await _call('GET', '${_conv(await _base(as), conversationId)}/messages$qs');
+    return _data(env, (raw) =&gt; ChatMessagePage.fromJson(_jsonMap(raw)));
+  }
+
+  /// `POST /chat/conversations/:id/messages`: send a text message through
+  /// the outbox.
+  ///
+  /// [clientMessageId] defaults to a fresh UUID; [onPending] receives it
+  /// right away (before any request), so the game can show the message as
+  /// pending and match it later against [ChatMessage.clientMessageId] (or
+  /// the stream's [ChatMessageEvent]) to settle it.
+  ///
+  /// The outbox keeps one send in flight per conversation, in call order
+  /// (different conversations run in parallel). Network drops, timeouts
+  /// and busy servers (5xx, 503 especially) are retried on their own with
+  /// the SAME request and `clientMessageId` (never posted twice), until
+  /// [KratyClientOptions.chatOutboxTimeout] (default 120 s, counted from
+  /// this call) runs out: then it throws [KratyChatNotSentError] (a
+  /// [KratyNetworkError]); show "not sent, tap to retry" and call its
+  /// `retry()`. The outbox lives in memory only: nothing survives an app
+  /// restart.
+  ///
+  /// Cooldown: when the message reaches the head of its queue and
+  /// [cooldownRemaining] is above 0, it fails at once, locally and without
+  /// a request, with a 429 `chat_slow_mode` [KratyApiError]
+  /// (`retryAfterSeconds` = the seconds left, `details['local'] == true`).
+  /// With [waitForCooldown] (default
+  /// [KratyClientOptions.chatWaitForCooldown]) it waits out the cooldown
+  /// in the outbox instead, then sends.
+  ///
+  /// Server anti-spam refusals throw at once, never retried: 429
+  /// `chat_slow_mode`, `chat_duplicate_message` or `chat_rate_limited`
+  /// ([KratyApiError.isChatRateLimited], [KratyApiError.retryAfterSeconds]).
+  /// Don't resend before then: repeated refusals mute the player
+  /// automatically (403 `chat_muted`). Other 4xx throw at once too.
+  Future&lt;ChatMessage&gt; send(
+    String conversationId,
+    String text, {
+    String? replyToId,
+    String? clientMessageId,
+    bool? waitForCooldown,
+    void Function(String clientMessageId)? onPending,
+    String? as,
+  }) {
+    final id = clientMessageId ?? _uuidV4();
+    onPending?.call(id);
+    return _send(
+      conversationId,
+      as,
+      &lt;String, Object?&gt;{
+        'type': 'text',
+        'text': text,
+        if (replyToId != null) 'replyToId': replyToId,
+        'clientMessageId': id,
+      },
+      waitForCooldown: waitForCooldown,
+    );
+  }
+
+  /// `POST /chat/conversations/:id/messages` with `type: custom`: send a
+  /// game card ([customType] declared in the game's config, a JSON
+  /// [payload], optional caption [text]) through the outbox.
+  /// [clientMessageId], [waitForCooldown] and [onPending] as in [send].
+  Future&lt;ChatMessage&gt; sendCustom(
+    String conversationId,
+    String customType,
+    Object? payload, {
+    String? text,
+    String? replyToId,
+    String? clientMessageId,
+    bool? waitForCooldown,
+    void Function(String clientMessageId)? onPending,
+    String? as,
+  }) {
+    final id = clientMessageId ?? _uuidV4();
+    onPending?.call(id);
+    return _send(
+      conversationId,
+      as,
+      &lt;String, Object?&gt;{
+        'type': 'custom',
+        'customType': customType,
+        if (payload != null) 'payload': payload,
+        if (text != null) 'text': text,
+        if (replyToId != null) 'replyToId': replyToId,
+        'clientMessageId': id,
+      },
+      waitForCooldown: waitForCooldown,
+    );
+  }
+
+  Future&lt;ChatMessage&gt; _send(
+    String conversationId,
+    String? as,
+    Map&lt;String, Object?&gt; body, {
+    bool? waitForCooldown,
+  }) {
+    final wait = waitForCooldown ?? _client.chatWaitForCooldown;
+    // One idempotency key per message, so every try is the same request.
+    final stamped = body.containsKey('idempotencyKey')
+        ? body
+        : &lt;String, Object?&gt;{...body, 'idempotencyKey': _client.nextIdempotencyKey()};
+    final queued = Stopwatch()..start();
+    return _enqueue(conversationId, () async {
+      final paused = await _awaitCooldown(conversationId, wait);
+      final env = await _deliver(
+        'POST',
+        '${_conv(await _base(as), conversationId)}/messages',
+        conversationId,
+        stamped,
+        clientMessageId: body['clientMessageId'] as String?,
+        elapsed: () =&gt; queued.elapsed - paused,
+        resend: () =&gt; _send(conversationId, as, stamped, waitForCooldown: waitForCooldown),
+      );
+      final message = _data(env, (raw) =&gt; ChatMessage.fromJson(_jsonMap(raw)));
+      _holdUntil(conversationId, DateTime.now().add(Duration(seconds: _cooldownOf(conversationId))));
+      return message;
+    });
+  }
+
+  /// `PATCH /chat/conversations/:id/messages/:messageId`: edit the text of
+  /// your own message within the game's edit window
+  /// ([ChatClientConfig.editWindowSeconds]; 0 = editing off). Returns the
+  /// updated message with [ChatMessage.editedAt] set; live streams get a
+  /// [ChatMessageEditedEvent]. Outside the window or on someone else's
+  /// message: `403 chat_edit_not_allowed` ([KratyApiError.isChatEditNotAllowed]).
+  /// Edits count toward the per-minute rate; a 429 throws at once like [send].
+  /// Network drops and busy servers are retried like a send (no queue, no
+  /// cooldown check) until [KratyClientOptions.chatOutboxTimeout], then
+  /// [KratyChatNotSentError] (with a null `clientMessageId`; `retry()`
+  /// makes the same edit again).
+  Future&lt;ChatMessage&gt; editMessage(String conversationId, String messageId, String text, {String? as}) =&gt;
+      _edit(conversationId, messageId, &lt;String, Object?&gt;{'text': text, 'idempotencyKey': _client.nextIdempotencyKey()},
+          as);
+
+  Future&lt;ChatMessage&gt; _edit(String conversationId, String messageId, Map&lt;String, Object?&gt; body, String? as) async {
+    final started = Stopwatch()..start();
+    final env = await _deliver(
+      'PATCH',
+      '${_conv(await _base(as), conversationId)}/messages/${_enc(messageId)}',
+      conversationId,
+      body,
+      clientMessageId: null,
+      elapsed: () =&gt; started.elapsed,
+      resend: () =&gt; _edit(conversationId, messageId, body, as),
+    );
+    return _data(env, (raw) =&gt; ChatMessage.fromJson(_jsonMap(raw)));
+  }
+
+  /// `DELETE /chat/conversations/:id/messages/:messageId`: delete your own
+  /// message (or any, where [ChatConversation.canModerate]).
+  Future&lt;void&gt; deleteMessage(String conversationId, String messageId, {String? as}) async {
+    await _call('DELETE', '${_conv(await _base(as), conversationId)}/messages/${_enc(messageId)}');
+  }
+
+  /// `POST /chat/conversations/:id/read`: mark read up to [seq]. Returns the
+  /// stored `lastReadSeq` (never moves backwards; clamped to the last message).
+  Future&lt;int&gt; markRead(String conversationId, int seq, {String? as}) async {
+    final env = await _call('POST', '${_conv(await _base(as), conversationId)}/read',
+        body: &lt;String, Object?&gt;{'seq': seq});
+    return _data(env, (raw) {
+      final v = _jsonMap(raw)['lastReadSeq'];
+      return v is num ? v.toInt() : 0;
+    });
+  }
+
+  /// `POST /chat/conversations/:id/typing`: tell the others you're typing.
+  /// Call at most every few seconds while the player types. Public channels
+  /// have no typing indicators: for a conversation the SDK knows is a
+  /// channel, nothing is sent.
+  Future&lt;void&gt; typing(String conversationId, {String? as}) async {
+    if (_known[conversationId]?.kind == 'channel') return;
+    await _call('POST', '${_conv(await _base(as), conversationId)}/typing', body: const &lt;String, Object?&gt;{});
+  }
+
+  /// `PUT /chat/conversations/:id/settings`: the player's own settings for
+  /// one conversation. [mutedUntil] silences it (and drops it from
+  /// [unread]) until then; [unmute] clears that. [hidden] hides it from the
+  /// inbox until a new message arrives.
+  Future&lt;ChatConversation&gt; setConversationSettings(
+    String conversationId, {
+    DateTime? mutedUntil,
+    bool unmute = false,
+    bool? hidden,
+    String? as,
+  }) async =&gt;
+      _conversation('PUT', '${_conv(await _base(as), conversationId)}/settings', body: &lt;String, Object?&gt;{
+        if (unmute)
+          'mutedUntil': null
+        else if (mutedUntil != null)
+          'mutedUntil': DateTime.fromMillisecondsSinceEpoch(mutedUntil.millisecondsSinceEpoch, isUtc: true)
+              .toIso8601String(),
+        if (hidden != null) 'hidden': hidden,
+      });
+
+  /// `GET /chat/stream`: the player's live chat feed over SSE. Follows
+  /// every conversation they're in, plus the public [channels] named here
+  /// (at most 10). Iterate `events` (a sealed [ChatStreamEvent] family) and
+  /// call `cancel()` when done.
+  ///
+  /// Self-healing by default ([autoReconnect]): after a server `close`
+  /// (waits its `retryAfterMs`), a network drop, a busy 503 (waits
+  /// `Retry-After`) or [heartbeatTimeout] of silence (default 40 s; the
+  /// server pings every 15 s; [Duration.zero] turns the watchdog off) it reconnects with jittered backoff capped at
+  /// 15 s. Once the new connection is `ready`, every followed conversation
+  /// is caught up with [messages] `after:` the last `seq` known (quiet ones
+  /// from [ChatReadyEvent.lastSeqs], ones added meanwhile from 0); the
+  /// missed messages arrive as normal
+  /// [ChatMessageEvent]s before any live event, and no `seq` is ever
+  /// delivered twice. `ChatStream.connection` reports `reconnecting` /
+  /// `connected`; [ChatCloseEvent] isn't delivered; `errors` only carries
+  /// fatal errors (e.g. 403 `chat_disabled`), after which `events` ends.
+  /// A fatal failure of the very first connect throws here; a transient
+  /// one doesn't (the stream starts out `reconnecting`).
+  ///
+  /// `autoReconnect: false` restores the single connection: listen on
+  /// `errors` and for [ChatCloseEvent], re-call after a backoff, then
+  /// catch up each conversation with [messages] `after:` the last `seq`.
+  Future&lt;ChatStream&gt; live({
+    List&lt;String&gt;? channels,
+    String? as,
+    bool autoReconnect = true,
+    Duration heartbeatTimeout = const Duration(seconds: 40),
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    return openChatStream(
+      baseUrl: _client.baseUrlForStreaming,
+      externalPlayerId: externalPlayerId,
+      authHeader: _client.authHeaderForStreaming,
+      httpClient: _client.httpForStreaming,
+      playerSecret: _client.playerSecretForStreaming,
+      currentPlayerSecret: () =&gt; _client.playerSecretForStreaming,
+      sdkUserAgent: _client.sdkUserAgentForStreaming,
+      channels: channels,
+      filter: _client.chatFilterValue,
+      autoReconnect: autoReconnect,
+      heartbeatTimeout: heartbeatTimeout,
+      fetchAfter: (conversationId, after) async {
+        final env = await _call(
+            'GET', '${_conv(await _base(externalPlayerId), conversationId)}/messages?after=$after');
+        final data = _jsonMap(env['data']);
+        final list = data['messages'];
+        return (
+          messages: list is List
+              ? list.whereType&lt;Map&lt;Object?, Object?&gt;&gt;().map((m) =&gt; m.cast&lt;String, Object?&gt;()).toList()
+              : &lt;Map&lt;String, Object?&gt;&gt;[],
+          hasMore: data['hasMore'] == true,
+        );
+      },
+    );
+  }
+}
+
+/// Resource client for player safety (docs/26): reports and the player's
+/// moderation standing. Works in every game, chat add-on or not (store
+/// compliance requires a way to report players).
+class ModerationClient {
+  final KratyClient _client;
+
+  ModerationClient(this._client);
+
+  Future&lt;String&gt; _base(String? as) async =&gt;
+      '/sdk/v1/players/${_enc(await _resolvePlayerId(_client, as))}';
+
+  /// `POST /reports`: report another player. [category] is a
+  /// [ReportCategory] value; [context] a [ReportContext] value (server
+  /// default `other`). For a chat report pass [conversationId] and the
+  /// offending [messageIds] so the reviewer sees the evidence.
+  Future&lt;MyReport&gt; report({
+    required String targetExternalPlayerId,
+    required String category,
+    String? context,
+    String? comment,
+    String? conversationId,
+    List&lt;String&gt;? messageIds,
+    String? guildId,
+    String? as,
+  }) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/reports',
+      body: &lt;String, Object?&gt;{
+        'targetExternalPlayerId': targetExternalPlayerId,
+        'category': category,
+        if (context != null) 'context': context,
+        if (comment != null) 'comment': comment,
+        if (conversationId != null) 'conversationId': conversationId,
+        if (messageIds != null) 'messageIds': messageIds,
+        if (guildId != null) 'guildId': guildId,
+      },
+    );
+    return _data(env, (raw) =&gt; MyReport.fromJson(_jsonMap(raw)));
+  }
+
+  /// `GET /reports`: the reports this player filed, newest first.
+  Future&lt;List&lt;MyReport&gt;&gt; reports({int? limit, String? as}) async {
+    final qs = limit == null ? '' : '?limit=$limit';
+    final env = await _client.request(method: 'GET', path: '${await _base(as)}/reports$qs');
+    return _data(env, (raw) =&gt; _jsonList(raw, 'reports', MyReport.fromJson));
+  }
+
+  /// `GET /moderation/status`: whether the player may chat / post, and the
+  /// restrictions in force (including unacknowledged warnings).
+  Future&lt;ModerationStatus&gt; status({String? as}) async {
+    final env = await _client.request(method: 'GET', path: '${await _base(as)}/moderation/status');
+    return _data(env, (raw) =&gt; ModerationStatus.fromJson(_jsonMap(raw)));
+  }
+
+  /// `POST /moderation/warnings/:restrictionId/acknowledge`: the player saw
+  /// the warning; it stops being active.
+  Future&lt;Restriction&gt; acknowledgeWarning(String restrictionId, {String? as}) async {
+    final env = await _client.request(
+      method: 'POST',
+      path: '${await _base(as)}/moderation/warnings/${_enc(restrictionId)}/acknowledge',
+    );
+    return _data(env, (raw) =&gt; Restriction.fromJson(_jsonMap(raw)));
+  }
+}
+
+/// Resource client for `/sdk/v1/players/:p/wallet(/...)`. Mirrors
+/// [InventoryClient] for currencies + progression resources.
+class WalletClient {
+  final KratyClient _client;
+
+  WalletClient(this._client);
+
+  /// `GET /sdk/v1/players/:p/wallet`: every economy entry the
+  /// player has touched. Returns zero-balance rows alongside
+  /// positive ones, so a wallet that's been emptied still surfaces.
+  /// Filter client-side if you only want live balances.
+  Future&lt;List&lt;PlayerWalletHolding&gt;&gt; list({String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/wallet',
+    );
+    return _data&lt;List&lt;PlayerWalletHolding&gt;&gt;(env, (raw) {
+      if (raw is Map) {
+        final wallet = raw['wallet'];
+        if (wallet is List) {
+          return wallet
+              .whereType&lt;Map&lt;String, Object?&gt;&gt;()
+              .map((e) =&gt; PlayerWalletHolding.fromJson(e.cast&lt;String, Object?&gt;()))
+              .toList(growable: false);
+        }
+      }
+      return const &lt;PlayerWalletHolding&gt;[];
+    });
+  }
+
+  /// `POST /sdk/v1/players/:p/wallet/:economyKey/debit`: atomic
+  /// decrement on the active player's wallet. 409 on insufficient
+  /// balance. Credit is intentionally not exposed here; see
+  /// [DebitWalletInput] docs.
+  Future&lt;DebitWalletResult&gt; debit(
+    String economyKey,
+    DebitWalletInput input, {
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/wallet/${_enc(economyKey)}/debit',
+      body: input.toJson(),
+    );
+    return _data&lt;DebitWalletResult&gt;(env, (raw) {
+      if (raw is Map) {
+        return DebitWalletResult.fromJson(raw.cast&lt;String, Object?&gt;());
+      }
+      return DebitWalletResult.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `POST /sdk/v1/players/:p/wallet/:economyKey/progress`: push progress
+  /// into a **progression** resource straight from the game client — XP
+  /// from a finished run, distance travelled, stars collected — with no
+  /// studio backend in the loop.
+  ///
+  /// The resource must be `kind: progression` AND flagged
+  /// **client-writable** in the dashboard; otherwise this fails 403.
+  /// Spendable currencies are never client-writable.
+  ///
+  /// Anything DERIVED from the resource moves with it in the same
+  /// transaction, and each level crossed pays its configured reward, so
+  /// [ProgressWalletResult.derived] can carry a `level` jump plus the grant
+  /// ids to claim — enough to render "Level 5!" and a reward popup without
+  /// a second request.
+  Future&lt;ProgressWalletResult&gt; progress(
+    String economyKey,
+    ProgressWalletInput input, {
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/wallet/${_enc(economyKey)}/progress',
+      body: input.toJson(),
+    );
+    return _data&lt;ProgressWalletResult&gt;(env, (raw) {
+      if (raw is Map) {
+        return ProgressWalletResult.fromJson(raw.cast&lt;String, Object?&gt;());
+      }
+      return ProgressWalletResult.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+}
+
+/// Resource client for `/sdk/v1/players/:p/register`: the zero-
+/// trust bootstrap. Game client calls `register()` once on first
+/// launch (or after the player wipes app data), captures the
+/// returned [PlayerRegistration.secret], persists it locally, and
+/// re-creates the [KratyClient] with `playerSecret: &lt;secret&gt;` so
+/// every subsequent player-scoped call carries the `X-Player-Secret`
+/// header. Without it those calls return 401 `player_secret_invalid`.
+class PlayersClient {
+  final KratyClient _client;
+
+  PlayersClient(this._client);
+
+  /// `POST /sdk/v1/players/:externalId/register`: creates the
+  /// player row if it doesn't exist + mints a per-player secret.
+  /// Returns 409 `player_already_registered` if the player has
+  /// already claimed a secret (lost-secret recovery is an admin
+  /// flow on the studio side, not a client capability).
+  ///
+  /// Pass [force]=true to ROTATE an existing secret. Only honoured
+  /// by non-`live` API keys (i.e. dev/test/staging). Useful in the
+  /// "I wiped my app data and need to re-register" flow during
+  /// testing; never wire this up in a production client.
+  Future&lt;PlayerRegistration&gt; register(
+    String externalPlayerId, {
+    bool force = false,
+  }) async {
+    final qs = force ? '?force=true' : '';
+    final env = await _client.request(
+      method: 'POST',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/register$qs',
+      body: const &lt;String, Object?&gt;{},
+    );
+    return _data&lt;PlayerRegistration&gt;(env, (raw) {
+      if (raw is Map) {
+        return PlayerRegistration.fromJson(raw.cast&lt;String, Object?&gt;());
+      }
+      return PlayerRegistration.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `PUT /sdk/v1/players/:externalId/identity`: set the active player's
+  /// OWN display name (+ optional [avatar]) — e.g. from a "choose your
+  /// username" screen. Overrides the identity auto-generated from the
+  /// game's pool and surfaces on leaderboards.
+  ///
+  /// Authorized by the player's own secret, so a client can only ever
+  /// change ITS OWN identity. This trusts the client; moderate names from
+  /// your backend (server SDK `players.setIdentity`) if you need to. Omit
+  /// [avatar] to clear it. [as] targets another player (server-side
+  /// tooling only). Throws `KratyApiException` `validation_failed` (400)
+  /// on an empty or over-long name.
+  Future&lt;PlayerIdentity?&gt; setIdentity(
+    String name, {
+    String? avatar,
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'PUT',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/identity',
+      body: &lt;String, Object?&gt;{
+        'name': name,
+        if (avatar != null) 'avatar': avatar,
+      },
+    );
+    return _data&lt;PlayerIdentity?&gt;(env, (raw) {
+      final map = raw is Map ? raw.cast&lt;String, Object?&gt;() : const &lt;String, Object?&gt;{};
+      final di = map['displayIdentity'];
+      if (di is Map) return PlayerIdentity.fromJson(di.cast&lt;String, Object?&gt;());
+      return null;
+    });
+  }
+
+  /// GET the player's REAL display identity — what [setIdentity] wrote,
+  /// falling back to the anonymized pool value when the player never
+  /// renamed themselves. Enriched with the server-resolved `country` so
+  /// UI can render a flag in one round-trip.
+  Future&lt;PlayerIdentity?&gt; getIdentity({String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/identity',
+    );
+    return _data&lt;PlayerIdentity?&gt;(env, (raw) {
+      final map = raw is Map ? raw.cast&lt;String, Object?&gt;() : const &lt;String, Object?&gt;{};
+      final di = map['displayIdentity'];
+      if (di is Map) return PlayerIdentity.fromJson(di.cast&lt;String, Object?&gt;());
+      return null;
+    });
+  }
+
+  /// GET the player's ANONYMIZED identity — always the immutable
+  /// synthetic-pool value plus country, regardless of any [setIdentity]
+  /// overrides. Use for public boards where the real name shouldn't
+  /// leak. Pair with [getIdentity] for a "real if set, anonymized
+  /// otherwise" flow.
+  Future&lt;PlayerIdentity?&gt; getAnonymizedIdentity({String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/identity',
+    );
+    return _data&lt;PlayerIdentity?&gt;(env, (raw) {
+      final map = raw is Map ? raw.cast&lt;String, Object?&gt;() : const &lt;String, Object?&gt;{};
+      final ai = map['anonymizedIdentity'];
+      if (ai is Map) return PlayerIdentity.fromJson(ai.cast&lt;String, Object?&gt;());
+      return null;
+    });
+  }
+
+  /// PUT the calling player's free-form `metadata` bag wholesale.
+  /// Studio-defined keys — anything the platform doesn't cover
+  /// (VIP flag, gender, preferred language, cohort). Surfaced on every
+  /// leaderboard entry as `entry.player.metadata`. Use [mergeMetadata]
+  /// if you only want to update a subset of keys.
+  Future&lt;Map&lt;String, Object?&gt;&gt; setMetadata(
+    Map&lt;String, Object?&gt; metadata, {
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'PUT',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/metadata',
+      body: metadata,
+    );
+    return _data&lt;Map&lt;String, Object?&gt;&gt;(env, (raw) {
+      final map = raw is Map ? raw.cast&lt;String, Object?&gt;() : const &lt;String, Object?&gt;{};
+      final m = map['metadata'];
+      return m is Map ? m.cast&lt;String, Object?&gt;() : &lt;String, Object?&gt;{};
+    });
+  }
+
+  /// PATCH the calling player's metadata: shallow-merge [patch] into
+  /// the existing bag. Keys not in [patch] stay untouched.
+  Future&lt;Map&lt;String, Object?&gt;&gt; mergeMetadata(
+    Map&lt;String, Object?&gt; patch, {
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'PATCH',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/metadata',
+      body: patch,
+    );
+    return _data&lt;Map&lt;String, Object?&gt;&gt;(env, (raw) {
+      final map = raw is Map ? raw.cast&lt;String, Object?&gt;() : const &lt;String, Object?&gt;{};
+      final m = map['metadata'];
+      return m is Map ? m.cast&lt;String, Object?&gt;() : &lt;String, Object?&gt;{};
+    });
+  }
+}
+
+/// Resource client for the player social graph, under
+/// `/sdk/v1/players/:externalId/...`: friend codes, requests, the
+/// friends list with live presence, username search, and blocking.
+///
+/// Every method is authorized by the active player's own secret, so a
+/// client can only ever act on ITS OWN social graph — friends are always
+/// scoped to the same game + environment. Pass `as:` on any method to
+/// address a different player (server-side tooling only).
+/// Builds the `?progression=level,trophies` query for the social-graph
+/// reads. Opt-in and explicit, because "the level" is a different economy
+/// key in every game; nothing extra is read server-side when omitted.
+String _giftQuery(bool pendingOnly, int? limit) {
+  final parts = &lt;String&gt;[
+    if (pendingOnly) 'status=pending',
+    if (limit != null) 'limit=$limit',
+  ];
+  return parts.isEmpty ? '' : '?${parts.join('&amp;')}';
+}
+
+String _progressionQuery(List&lt;String&gt;? keys) {
+  if (keys == null || keys.isEmpty) return '';
+  return '?progression=${_enc(keys.join(','))}';
+}
+
+class FriendsClient {
+  final KratyClient _client;
+
+  FriendsClient(this._client);
+
+  /// `GET /sdk/v1/players/:externalId/friend-code`: the caller's short,
+  /// shareable friend code (6 chars, unambiguous alphabet), generated on
+  /// first use and stable forever after. Share it out-of-band so a friend
+  /// can [add] you without a username search.
+  ///
+  /// Pass [progression] to also get the caller's OWN balances of those
+  /// progression items (e.g. `['level']`), so a profile card can render the
+  /// code and the level from one request.
+  Future&lt;FriendCode&gt; getCode({List&lt;String&gt;? progression, String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friend-code${_progressionQuery(progression)}',
+    );
+    return _data&lt;FriendCode&gt;(env, (raw) {
+      if (raw is Map) return FriendCode.fromJson(raw.cast&lt;String, Object?&gt;());
+      return FriendCode.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `POST /sdk/v1/players/:externalId/presence`: refresh the caller's
+  /// online status. Call every ~30s while the player is active; presence
+  /// expires automatically when heartbeats stop. Optionally set a
+  /// free-form [status] label ("in_match", "lobby", …) that friends see.
+  ///
+  /// Mirrors the existing SDK idiom (see `players.setIdentity`'s `avatar`):
+  /// [status] is only sent when non-null, so a heartbeat without a status
+  /// leaves the current one untouched.
+  Future&lt;PlayerPresence&gt; heartbeat({String? status, String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/presence',
+      body: &lt;String, Object?&gt;{
+        if (status != null) 'status': status,
+      },
+    );
+    return _data&lt;PlayerPresence&gt;(env, (raw) {
+      if (raw is Map) return PlayerPresence.fromJson(raw.cast&lt;String, Object?&gt;());
+      return PlayerPresence.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `GET /sdk/v1/players/:externalId/friends`: the caller's accepted
+  /// friends, each enriched with display identity and live presence
+  /// (online / last-active / status).
+  ///
+  /// Pass [progression] with the economy keys your game uses (e.g.
+  /// `['level']`) and each friend comes back with those balances in the
+  /// same round-trip — enough to render "Lv 12 ShadowStrike" without a
+  /// request per friend. A resource a friend never earned reads `0`.
+  Future&lt;List&lt;Friend&gt;&gt; list({List&lt;String&gt;? progression, String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friends${_progressionQuery(progression)}',
+    );
+    return _data&lt;List&lt;Friend&gt;&gt;(env, (raw) {
+      if (raw is Map) {
+        final friends = raw['friends'];
+        if (friends is List) {
+          return friends
+              .whereType&lt;Map&lt;String, Object?&gt;&gt;()
+              .map((e) =&gt; Friend.fromJson(e.cast&lt;String, Object?&gt;()))
+              .toList(growable: false);
+        }
+      }
+      return const &lt;Friend&gt;[];
+    });
+  }
+
+  /// `GET /sdk/v1/players/:externalId/friends/search?q=`: find other
+  /// players by display name within the same game + environment. Each hit
+  /// reports the caller's [FriendSearchResult.relationship] to that player;
+  /// blocked players are omitted.
+  Future&lt;List&lt;FriendSearchResult&gt;&gt; search(
+    String query, {
+    int? limit,
+    List&lt;String&gt;? progression,
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final qs = &lt;String&gt;['q=${_enc(query)}'];
+    if (limit != null) qs.add('limit=$limit');
+    if (progression != null &amp;&amp; progression.isNotEmpty) {
+      qs.add('progression=${_enc(progression.join(','))}');
+    }
+    final env = await _client.request(
+      method: 'GET',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friends/search?${qs.join('&amp;')}',
+    );
+    return _data&lt;List&lt;FriendSearchResult&gt;&gt;(env, (raw) {
+      if (raw is Map) {
+        final results = raw['results'];
+        if (results is List) {
+          return results
+              .whereType&lt;Map&lt;String, Object?&gt;&gt;()
+              .map((e) =&gt; FriendSearchResult.fromJson(e.cast&lt;String, Object?&gt;()))
+              .toList(growable: false);
+        }
+      }
+      return const &lt;FriendSearchResult&gt;[];
+    });
+  }
+
+  /// `GET /sdk/v1/players/:externalId/friends/suggestions`: "people you may
+  /// want to add" — recently-active players in the same game + environment
+  /// the caller isn't already related to (not a friend, no pending request
+  /// either way, not blocked). Results are a weighted-random sample biased
+  /// toward the most recently active, so calling it again surfaces a
+  /// different set. [limit] defaults to 5 server-side (clamped 1–25).
+  Future&lt;List&lt;Suggestion&gt;&gt; suggestions({
+    int? limit,
+    List&lt;String&gt;? progression,
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final qs = &lt;String&gt;[];
+    if (limit != null) qs.add('limit=$limit');
+    if (progression != null &amp;&amp; progression.isNotEmpty) {
+      qs.add('progression=${_enc(progression.join(','))}');
+    }
+    final env = await _client.request(
+      method: 'GET',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friends/suggestions${qs.isEmpty ? '' : '?${qs.join('&amp;')}'}',
+    );
+    return _data&lt;List&lt;Suggestion&gt;&gt;(env, (raw) {
+      if (raw is Map) {
+        final suggestions = raw['suggestions'];
+        if (suggestions is List) {
+          return suggestions
+              .whereType&lt;Map&lt;String, Object?&gt;&gt;()
+              .map((e) =&gt; Suggestion.fromJson(e.cast&lt;String, Object?&gt;()))
+              .toList(growable: false);
+        }
+      }
+      return const &lt;Suggestion&gt;[];
+    });
+  }
+
+  /// `GET /sdk/v1/players/:externalId/friends/requests`: the caller's
+  /// pending incoming + outgoing friend requests.
+  ///
+  /// Pass [progression] to attach each player's progression balances.
+  Future&lt;FriendRequests&gt; listRequests({
+    List&lt;String&gt;? progression,
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friends/requests${_progressionQuery(progression)}',
+    );
+    return _data&lt;FriendRequests&gt;(env, (raw) {
+      if (raw is Map) return FriendRequests.fromJson(raw.cast&lt;String, Object?&gt;());
+      return FriendRequests.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `POST /sdk/v1/players/:externalId/friends/requests`: add another
+  /// player by [FriendTarget.byCode] or [FriendTarget.byExternalPlayerId]
+  /// (exactly one). Creates a pending request they must accept — unless
+  /// they had already requested the caller, in which case the friendship is
+  /// accepted immediately ([SendFriendRequestResult.status] == `accepted`).
+  ///
+  /// Throws [KratyApiError] on `player_blocked` (403), `already_friends`
+  /// (409), `cannot_friend_self` (400), or `friend_code_invalid` (404).
+  Future&lt;SendFriendRequestResult&gt; add(FriendTarget target, {String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/friends/requests',
+      body: target.toJson(),
+    );
+    return _data&lt;SendFriendRequestResult&gt;(env, (raw) {
+      if (raw is Map) {
+        return SendFriendRequestResult.fromJson(raw.cast&lt;String, Object?&gt;());
+      }
+      return SendFriendRequestResult.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `POST /sdk/v1/players/:externalId/friends/requests/:id/accept`:
+  /// accept an incoming request, returning the new [Friend].
+  Future&lt;Friend&gt; accept(String requestId, {String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friends/requests/${_enc(requestId)}/accept',
+      body: const &lt;String, Object?&gt;{},
+    );
+    return _data&lt;Friend&gt;(env, (raw) {
+      final map =
+          raw is Map ? raw.cast&lt;String, Object?&gt;() : const &lt;String, Object?&gt;{};
+      final friend = map['friend'];
+      if (friend is Map) return Friend.fromJson(friend.cast&lt;String, Object?&gt;());
+      return Friend.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `POST /sdk/v1/players/:externalId/friends/requests/:id/decline`:
+  /// decline an incoming request.
+  Future&lt;void&gt; decline(String requestId, {String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friends/requests/${_enc(requestId)}/decline',
+      body: const &lt;String, Object?&gt;{},
+    );
+  }
+
+  /// `DELETE /sdk/v1/players/:externalId/friends/requests/:id`: cancel an
+  /// outgoing request the caller sent.
+  Future&lt;void&gt; cancelRequest(String requestId, {String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    await _client.request(
+      method: 'DELETE',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friends/requests/${_enc(requestId)}',
+    );
+  }
+
+  /// `DELETE /sdk/v1/players/:externalId/friends/:friendExternalId`:
+  /// remove an existing friend.
+  Future&lt;void&gt; remove(String friendExternalId, {String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    await _client.request(
+      method: 'DELETE',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friends/${_enc(friendExternalId)}',
+    );
+  }
+
+  /// `GET /sdk/v1/players/:externalId/blocks`: the players the caller has
+  /// blocked.
+  Future&lt;List&lt;BlockedPlayer&gt;&gt; listBlocks({String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/blocks',
+    );
+    return _data&lt;List&lt;BlockedPlayer&gt;&gt;(env, (raw) {
+      if (raw is Map) {
+        final blocked = raw['blocked'];
+        if (blocked is List) {
+          return blocked
+              .whereType&lt;Map&lt;String, Object?&gt;&gt;()
+              .map((e) =&gt; BlockedPlayer.fromJson(e.cast&lt;String, Object?&gt;()))
+              .toList(growable: false);
+        }
+      }
+      return const &lt;BlockedPlayer&gt;[];
+    });
+  }
+
+  /// `POST /sdk/v1/players/:externalId/blocks`: block a player by
+  /// [FriendTarget.byCode] or [FriendTarget.byExternalPlayerId]. Tears down
+  /// any friendship / pending request between the two and hides each from
+  /// the other's search + presence.
+  Future&lt;BlockedPlayer&gt; block(FriendTarget target, {String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/blocks',
+      body: target.toJson(),
+    );
+    return _data&lt;BlockedPlayer&gt;(env, (raw) {
+      final map =
+          raw is Map ? raw.cast&lt;String, Object?&gt;() : const &lt;String, Object?&gt;{};
+      final blocked = map['blocked'];
+      if (blocked is Map) {
+        return BlockedPlayer.fromJson(blocked.cast&lt;String, Object?&gt;());
+      }
+      return BlockedPlayer.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `DELETE /sdk/v1/players/:externalId/blocks/:blockedExternalId`:
+  /// unblock a player.
+  Future&lt;void&gt; unblock(String blockedExternalId, {String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    await _client.request(
+      method: 'DELETE',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/blocks/${_enc(blockedExternalId)}',
+    );
+  }
+
+  // ── Gifting ────────────────────────────────────────────────────────
+
+  /// `GET /sdk/v1/players/:externalId/friends/gifts/catalog`: what this
+  /// player may gift, and how often.
+  ///
+  /// Returns the studio's allowlist — every catalog row flagged giftable in
+  /// the dashboard — plus the game's cooldown / daily-limit config, so a gift
+  /// picker can be driven entirely from server config. `type: 'currency'`
+  /// entries include progression items like XP. Throws when the game hasn't
+  /// enabled gifting (`403 gifting_disabled`).
+  Future&lt;GiftCatalog&gt; giftCatalog({String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/friends/gifts/catalog',
+    );
+    return _data&lt;GiftCatalog&gt;(env, (raw) {
+      if (raw is Map) return GiftCatalog.fromJson(raw.cast&lt;String, Object?&gt;());
+      return GiftCatalog.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+
+  /// `POST /sdk/v1/players/:externalId/friends/gifts`: send a gift to an
+  /// accepted friend.
+  ///
+  /// The catalog decides what may travel and how much of it; when the
+  /// resource is configured to cost the sender, their balance is debited in
+  /// the same transaction. The recipient receives a PENDING grant that stays
+  /// unopened until they call [claimGift]. Pass an `idempotencyKey` so a
+  /// retry returns the original gift instead of failing the cooldown.
+  Future&lt;Gift&gt; sendGift(SendGiftInput input, {String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path: '/sdk/v1/players/${_enc(externalPlayerId)}/friends/gifts',
+      body: input.toJson(),
+    );
+    return _oneGift(env);
+  }
+
+  /// `GET /sdk/v1/players/:externalId/friends/gifts`: the player's gift
+  /// inbox, newest first. Set [pendingOnly] to narrow it to gifts still
+  /// waiting to be claimed.
+  Future&lt;List&lt;Gift&gt;&gt; gifts({
+    bool pendingOnly = false,
+    int? limit,
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friends/gifts${_giftQuery(pendingOnly, limit)}',
+    );
+    return _giftList(env);
+  }
+
+  /// `GET /sdk/v1/players/:externalId/friends/gifts/sent`: gifts this player
+  /// has sent, newest first.
+  Future&lt;List&lt;Gift&gt;&gt; sentGifts({
+    bool pendingOnly = false,
+    int? limit,
+    String? as,
+  }) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'GET',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friends/gifts/sent${_giftQuery(pendingOnly, limit)}',
+    );
+    return _giftList(env);
+  }
+
+  /// `POST /sdk/v1/players/:externalId/friends/gifts/:giftId/claim`: claim a
+  /// received gift.
+  ///
+  /// This is where a gift pays out: the delivering grant defers its deposit
+  /// to claim time, so an unopened gift is genuinely unopened. Replays on an
+  /// already-claimed gift return the same row.
+  Future&lt;Gift&gt; claimGift(String giftId, {String? as}) async {
+    final externalPlayerId = await _resolvePlayerId(_client, as);
+    final env = await _client.request(
+      method: 'POST',
+      path:
+          '/sdk/v1/players/${_enc(externalPlayerId)}/friends/gifts/${_enc(giftId)}/claim',
+    );
+    return _oneGift(env);
+  }
+
+  List&lt;Gift&gt; _giftList(Map&lt;String, Object?&gt; env) =&gt;
+      _data&lt;List&lt;Gift&gt;&gt;(env, (raw) {
+        if (raw is Map) {
+          final gifts = raw['gifts'];
+          if (gifts is List) {
+            return gifts
+                .whereType&lt;Map&lt;String, Object?&gt;&gt;()
+                .map((e) =&gt; Gift.fromJson(e.cast&lt;String, Object?&gt;()))
+                .toList(growable: false);
+          }
+        }
+        return const &lt;Gift&gt;[];
+      });
+
+  Gift _oneGift(Map&lt;String, Object?&gt; env) =&gt; _data&lt;Gift&gt;(env, (raw) {
+        if (raw is Map) {
+          final gift = raw['gift'];
+          if (gift is Map) return Gift.fromJson(gift.cast&lt;String, Object?&gt;());
+        }
+        return Gift.fromJson(const &lt;String, Object?&gt;{});
+      });
+}
+
+/// Resource client for `/sdk/v1/catalog`: single-shot read of every
+/// item + currency configured for the calling game. Studios call this
+/// once at boot and cache locally; pairs with `events.listForPlayer`
+/// (which inlines reward-bundle previews) so a UI can render names,
+/// icons, rarities, and reward previews without keeping a parallel
+/// catalog in the client codebase.
+class CatalogClient {
+  final KratyClient _client;
+
+  CatalogClient(this._client);
+
+  /// `GET /sdk/v1/catalog`: items + currencies for the calling
+  /// game. Game is derived from the API key; no parameters.
+  Future&lt;Catalog&gt; read() async {
+    final env = await _client.request(method: 'GET', path: '/sdk/v1/catalog');
+    return _data&lt;Catalog&gt;(env, (raw) {
+      if (raw is Map) return Catalog.fromJson(raw.cast&lt;String, Object?&gt;());
+      return Catalog.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+}
+
+/// Resource client for `/sdk/v1/lobbies/:id`. Used after `/start`
+/// returns `lobby_forming`: poll this until `status` transitions
+/// out of `forming`, then retry start.
+class LobbiesClient {
+  final KratyClient _client;
+
+  LobbiesClient(this._client);
+
+  Future&lt;Lobby&gt; read(String lobbyId) async {
+    final env = await _client.request(
+      method: 'GET',
+      path: '/sdk/v1/lobbies/${_enc(lobbyId)}',
+    );
+    return _data&lt;Lobby&gt;(env, (raw) {
+      if (raw is Map) return Lobby.fromJson(raw.cast&lt;String, Object?&gt;());
+      return Lobby.fromJson(const &lt;String, Object?&gt;{});
+    });
+  }
+}
+
+/// Adaptive polling helpers.
+
+class PollPendingGrantsOptions {
+  /// Initial poll interval. Defaults to 2s.
+  final Duration start;
+
+  /// Multiplier between polls when the queue is empty. Defaults to 1.5.
+  final double grow;
+
+  /// Cap on interval growth. Defaults to 30s.
+  final Duration max;
+
+  /// Fires for every batch (including empty ones).
+  final void Function(List&lt;Grant&gt;)? onBatch;
+
+  const PollPendingGrantsOptions({
+    this.start = const Duration(seconds: 2),
+    this.grow = 1.5,
+    this.max = const Duration(seconds: 30),
+    this.onBatch,
+  });
+}
+
+/// Adaptive polling for a player's pending grants. Grows the interval
+/// while the queue is empty; resets to the floor when grants land.
+/// Resolves when the [signal] future completes (for example,
+/// `Future.delayed(...).then(...)` or a `Completer.future`).
+Future&lt;void&gt; pollPendingGrants(
+  GrantsClient grants, {
+  PollPendingGrantsOptions options = const PollPendingGrantsOptions(),
+  Future&lt;void&gt;? signal,
+  /// Override the active player. Server tooling only. Defaults to
+  /// the active id baked into the [GrantsClient]'s `KratyClient`.
+  String? as,
+}) async {
+  var aborted = false;
+  signal?.whenComplete(() =&gt; aborted = true);
+  var interval = options.start;
+  while (!aborted) {
+    final batch = await grants.listPending(as: as);
+    options.onBatch?.call(batch);
+    if (batch.isNotEmpty) {
+      interval = options.start;
+    } else {
+      final grown = Duration(
+        milliseconds:
+            (interval.inMilliseconds * options.grow).round(),
+      );
+      interval = grown &gt; options.max ? options.max : grown;
+    }
+    await Future.any&lt;void&gt;([
+      Future&lt;void&gt;.delayed(interval),
+      if (signal != null) signal,
+    ]);
+  }
+}
+
+class PollLobbyOptions {
+  /// Fixed poll interval. Defaults to 1s.
+  final Duration interval;
+
+  /// Cap on total wait before throwing [TimeoutException]. Defaults to 60s.
+  final Duration timeout;
+
+  const PollLobbyOptions({
+    this.interval = const Duration(seconds: 1),
+    this.timeout = const Duration(seconds: 60),
+  });
+}
+
+/// Polls a lobby until it transitions out of `forming`. Throws
+/// [TimeoutException] when the deadline elapses.
+Future&lt;Lobby&gt; pollLobbyUntilActive(
+  LobbiesClient lobbies,
+  String lobbyId, {
+  PollLobbyOptions options = const PollLobbyOptions(),
+}) async {
+  final deadline = DateTime.now().add(options.timeout);
+  while (DateTime.now().isBefore(deadline)) {
+    final lobby = await lobbies.read(lobbyId);
+    if (lobby.status != 'forming') return lobby;
+    await Future&lt;void&gt;.delayed(options.interval);
+  }
+  throw TimeoutException(
+    "pollLobbyUntilActive: lobby '$lobbyId' did not leave 'forming' within ${options.timeout}",
+  );
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

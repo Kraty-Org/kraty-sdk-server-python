@@ -1,0 +1,159 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-flutter/lib/src/inventory_stream.dart</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-flutter/lib/src/inventory_stream.dart</h1><p class=muted>kraty-sdk-flutter/lib/src/inventory_stream.dart</p><pre><code class="language-dart">import 'dart:async';
+
+import 'package:http/http.dart' as http;
+
+import 'reconnecting_sse.dart';
+import 'sse.dart';
+
+/// Live feed of everything that touches a player's items, wallet, and
+/// grants — no matter who caused it.
+///
+/// Before this, a game only saw changes it made itself: a reward granted
+/// from the dashboard, a currency credited by the studio's backend, or an
+/// event payout landed in the database and the running client kept showing
+/// stale numbers until the next launch.
+
+/// Who caused a change. Lets a client skip the echo of its own writes.
+class InventoryEventOrigin {
+  static const String client = 'client';
+  static const String server = 'server';
+  static const String admin = 'admin';
+  static const String engine = 'engine';
+}
+
+/// One event off the inventory stream. [kind] is the SSE `event:` line:
+///
+///   - `ready`             handshake, once the subscription is wired
+///   - `inventory_changed` an item quantity moved
+///   - `wallet_changed`    a currency / progression balance moved
+///   - `grant_created`     a reward became claimable
+///
+/// [data] is the parsed payload. The typed getters below cover the common
+/// fields; read [data] directly for anything a newer backend adds.
+class InventoryStreamEvent {
+  final String kind;
+  final Map&lt;String, Object?&gt; data;
+
+  const InventoryStreamEvent({required this.kind, required this.data});
+
+  /// `client` / `server` / `admin` / `engine`; empty for `ready`.
+  String get origin =&gt; _str('origin');
+
+  /// Set on `inventory_changed`.
+  String get itemKey =&gt; _str('itemKey');
+
+  /// Set on `wallet_changed`.
+  String get economyKey =&gt; _str('economyKey');
+
+  /// Signed change; negative for a consume. 0 when not applicable.
+  int get delta =&gt; _int('delta');
+
+  /// Quantity AFTER the change (`inventory_changed`).
+  int get quantity =&gt; _int('quantity');
+
+  /// Balance AFTER the change (`wallet_changed`).
+  int get balance =&gt; _int('balance');
+
+  /// Ledger reason (`grant_deposit`, `consume`, `admin_grant`, …).
+  String get reason =&gt; _str('reason');
+
+  /// Set on `grant_created`; claim it with `grants.collectAll()`.
+  String get grantId =&gt; _str('grantId');
+
+  /// True when this event is the echo of a write the client itself made.
+  bool get isOwnWrite =&gt; origin == InventoryEventOrigin.client;
+
+  String _str(String key) {
+    final v = data[key];
+    return v is String ? v : '';
+  }
+
+  int _int(String key) {
+    final v = data[key];
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return 0;
+  }
+}
+
+/// Handle to an active inventory subscription. Call [cancel] to stop.
+///
+/// By default the stream heals itself: after a server `close`, a network
+/// drop, a busy server or heartbeat silence it reconnects on its own (no
+/// replay: re-read what you show on `connected`). With
+/// `autoReconnect: false` it is a single connection and [errors] carries
+/// transport failures.
+class InventoryStream {
+  /// Server-pushed events. Single-subscriber.
+  final Stream&lt;InventoryStreamEvent&gt; events;
+
+  /// With auto-reconnect: fatal errors only (the stream ends after one).
+  /// Without: transport failures; re-invoke `inventory.live()` after a
+  /// backoff if you want resumption. Broadcast.
+  final Stream&lt;Object&gt; errors;
+
+  /// Connection status (`connected` / `reconnecting`); see
+  /// [KratyConnectionEvent]. Single-subscriber and buffered. Empty with
+  /// `autoReconnect: false`.
+  final Stream&lt;KratyConnectionEvent&gt; connection;
+
+  final KratyConnectionState Function() _state;
+  final Future&lt;void&gt; Function() _cancel;
+
+  InventoryStream._(this.events, this.errors, this.connection, this._state, this._cancel);
+
+  /// The current connection state. Always `connected` with
+  /// `autoReconnect: false`.
+  KratyConnectionState get connectionState =&gt; _state();
+
+  /// Cancels the subscription, closes the HTTP socket and cancels any
+  /// pending reconnect. Idempotent.
+  Future&lt;void&gt; cancel() =&gt; _cancel();
+}
+
+/// Opens an SSE subscription to a player's inventory / wallet / grants.
+/// With [autoReconnect] it reconnects itself; without, a single
+/// connection.
+Future&lt;InventoryStream&gt; openInventoryStream({
+  required String baseUrl,
+  required String externalPlayerId,
+  required String authHeader,
+  required http.Client httpClient,
+  required String sdkUserAgent,
+  String? playerSecret,
+  String? Function()? currentPlayerSecret,
+  bool autoReconnect = false,
+  Duration heartbeatTimeout = const Duration(seconds: 40),
+}) async {
+  Future&lt;SseStream&gt; connect({void Function()? onActivity}) =&gt; openSseStream(
+        baseUrl: baseUrl,
+        path: '/sdk/v1/players/${Uri.encodeComponent(externalPlayerId)}/inventory/stream',
+        authHeader: authHeader,
+        httpClient: httpClient,
+        sdkUserAgent: sdkUserAgent,
+        label: 'inventory stream',
+        playerSecret: currentPlayerSecret?.call() ?? playerSecret,
+        onActivity: onActivity,
+      );
+  InventoryStreamEvent map(SseEvent e) =&gt; InventoryStreamEvent(kind: e.kind, data: e.data);
+
+  if (!autoReconnect) {
+    final raw = await connect();
+    return InventoryStream._(
+      raw.events.map(map),
+      raw.errors,
+      const Stream&lt;KratyConnectionEvent&gt;.empty(),
+      () =&gt; KratyConnectionState.connected,
+      raw.cancel,
+    );
+  }
+  final core = ReconnectingSse(
+    connect: (onActivity) =&gt; connect(onActivity: onActivity),
+    heartbeatTimeout: heartbeatTimeout,
+  );
+  await core.start();
+  return InventoryStream._(core.events.map(map), core.errors, core.connection, () =&gt; core.state, core.cancel);
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

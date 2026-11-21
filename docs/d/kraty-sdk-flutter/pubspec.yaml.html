@@ -1,0 +1,35 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-flutter/pubspec.yaml</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-flutter/pubspec.yaml</h1><p class=muted>kraty-sdk-flutter/pubspec.yaml</p><pre><code class="language-yaml">name: kraty
+description: |
+  Dart/Flutter SDK for the Kraty game-events platform. Wraps the
+  public /sdk/v1 surface: events, leaderboards, grants, crates,
+  lobbies, inventory, wallet, per-player auth.
+
+  SECURITY: this SDK is for game CLIENTS. It deliberately does NOT
+  expose the /server/v1 (server_integration) or /admin/v1 surfaces,
+  which can mint currency / grant items / rotate player secrets.
+  Embedding a server_integration key in a shipped game client is a
+  security incident. Use the @kraty/server-sdk (Node) from your
+  own backend instead.
+version: 0.31.0
+repository: https://github.com/kraty-team/kraty
+issue_tracker: https://github.com/kraty-team/kraty/issues
+
+environment:
+  sdk: ^3.6.0
+  flutter: "&gt;=3.16.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  meta: ^1.15.0
+  package_info_plus: ^8.0.0
+  shared_preferences: ^2.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  lints: ^5.0.0
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

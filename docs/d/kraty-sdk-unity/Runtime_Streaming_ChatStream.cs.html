@@ -1,0 +1,572 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-unity/Runtime/Streaming/ChatStream.cs</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-unity/Runtime/Streaming/ChatStream.cs</h1><p class=muted>kraty-sdk-unity/Runtime/Streaming/ChatStream.cs</p><pre><code class="language-csharp">using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+
+namespace Kraty
+{
+    /// &lt;summary&gt;The SSE &lt;c&gt;event:&lt;/c&gt; names the chat stream sends.&lt;/summary&gt;
+    public static class ChatStreamEventKind
+    {
+        public const string Ready = "ready";
+        public const string Message = "message";
+        public const string MessageEdited = "message_edited";
+        public const string MessageDeleted = "message_deleted";
+        public const string Typing = "typing";
+        public const string Read = "read";
+        public const string ConversationAdded = "conversation_added";
+        public const string ConversationUpdated = "conversation_updated";
+        public const string ConversationRemoved = "conversation_removed";
+        public const string Restriction = "restriction";
+        public const string RestrictionLifted = "restriction_lifted";
+        public const string Close = "close";
+    }
+
+    /// &lt;summary&gt;
+    /// One raw event off the chat stream: &lt;see cref="Kind"/&gt; is the SSE
+    /// &lt;c&gt;event:&lt;/c&gt; line, &lt;see cref="Data"/&gt; the parsed JSON. The typed
+    /// callbacks on &lt;see cref="ChatStream"/&gt; cover every known kind; this
+    /// form also carries kinds a newer backend adds.
+    /// &lt;/summary&gt;
+    public sealed class ChatStreamEvent
+    {
+        public string Kind { get; }
+        public Dictionary&lt;string, JToken&gt; Data { get; }
+
+        public ChatStreamEvent(string kind, Dictionary&lt;string, JToken&gt; data)
+        {
+            Kind = kind;
+            Data = data;
+        }
+    }
+
+    /// &lt;summary&gt;A public channel the stream follows: the conversation of the player's &lt;see cref="Room"/&gt; in it.&lt;/summary&gt;
+    public sealed class ChatStreamChannel
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        /// &lt;summary&gt;The player's room in the channel (0-based); each room is its own conversation.&lt;/summary&gt;
+        [JsonProperty("room")] public int Room { get; set; }
+    }
+
+    /// &lt;summary&gt;&lt;c&gt;ready&lt;/c&gt;: every listener is wired; nothing sent after this is missed.&lt;/summary&gt;
+    public sealed class ChatStreamReady
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        /// &lt;summary&gt;The inbox conversations this stream follows.&lt;/summary&gt;
+        [JsonProperty("conversationIds")] public List&lt;string&gt; ConversationIds { get; set; } = new();
+        /// &lt;summary&gt;The channels named in &lt;c&gt;channels&lt;/c&gt; that resolved, with their conversation ids.&lt;/summary&gt;
+        [JsonProperty("channels")] public List&lt;ChatStreamChannel&gt; Channels { get; set; } = new();
+        /// &lt;summary&gt;
+        /// Every followed conversation's latest seq at connect time (inbox and
+        /// channel rooms). The self-healing stream seeds its catch-up from it.
+        /// Null from older servers.
+        /// &lt;/summary&gt;
+        [JsonProperty("lastSeqs")] public Dictionary&lt;string, long&gt;? LastSeqs { get; set; }
+    }
+
+    /// &lt;summary&gt;&lt;c&gt;message_deleted&lt;/c&gt;: drop or grey out the message.&lt;/summary&gt;
+    public sealed class ChatMessageDeletedEvent
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        [JsonProperty("messageId")] public string MessageId { get; set; } = string.Empty;
+        [JsonProperty("seq")] public long Seq { get; set; }
+    }
+
+    /// &lt;summary&gt;&lt;c&gt;typing&lt;/c&gt;: another player is typing (never your own).&lt;/summary&gt;
+    public sealed class ChatTypingEvent
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        [JsonProperty("player")] public ChatPlayerRef Player { get; set; } = new();
+    }
+
+    /// &lt;summary&gt;&lt;c&gt;read&lt;/c&gt;: another member read up to &lt;see cref="Seq"/&gt;.&lt;/summary&gt;
+    public sealed class ChatReadEvent
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("seq")] public long Seq { get; set; }
+    }
+
+    /// &lt;summary&gt;&lt;c&gt;conversation_added&lt;/c&gt;: the player joined a conversation; the stream now follows it.&lt;/summary&gt;
+    public sealed class ChatConversationAddedEvent
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        [JsonProperty("kind")] public string Kind { get; set; } = string.Empty;
+    }
+
+    /// &lt;summary&gt;&lt;c&gt;conversation_updated&lt;/c&gt;: title / metadata / member count changed.&lt;/summary&gt;
+    public sealed class ChatConversationUpdatedEvent
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        [JsonProperty("title")] public string? Title { get; set; }
+        [JsonProperty("metadata")] public Dictionary&lt;string, JToken&gt; Metadata { get; set; } = new();
+        [JsonProperty("memberCount")] public int MemberCount { get; set; }
+    }
+
+    /// &lt;summary&gt;&lt;c&gt;conversation_removed&lt;/c&gt;: the player left or was removed; the stream stops following it.&lt;/summary&gt;
+    public sealed class ChatConversationRemovedEvent
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        [JsonProperty("reason")] public string Reason { get; set; } = string.Empty;
+    }
+
+    /// &lt;summary&gt;&lt;c&gt;restriction&lt;/c&gt;: a warning, mute or chat ban was put on the player.&lt;/summary&gt;
+    public sealed class ChatRestrictionEvent
+    {
+        [JsonProperty("restrictionId")] public string RestrictionId { get; set; } = string.Empty;
+        /// &lt;summary&gt;&lt;c&gt;warning&lt;/c&gt;, &lt;c&gt;chat_mute&lt;/c&gt; or &lt;c&gt;chat_ban&lt;/c&gt;.&lt;/summary&gt;
+        [JsonProperty("kind")] public string Kind { get; set; } = string.Empty;
+        [JsonProperty("reason")] public string? Reason { get; set; }
+        [JsonProperty("expiresAt")] public string? ExpiresAt { get; set; }
+    }
+
+    /// &lt;summary&gt;&lt;c&gt;restriction_lifted&lt;/c&gt;: a restriction was lifted early.&lt;/summary&gt;
+    public sealed class ChatRestrictionLiftedEvent
+    {
+        [JsonProperty("restrictionId")] public string RestrictionId { get; set; } = string.Empty;
+        [JsonProperty("kind")] public string Kind { get; set; } = string.Empty;
+    }
+
+    /// &lt;summary&gt;
+    /// &lt;c&gt;close&lt;/c&gt;: the server is closing the stream (&lt;c&gt;shutdown&lt;/c&gt;,
+    /// &lt;c&gt;rebalance&lt;/c&gt;, or &lt;c&gt;slow_consumer&lt;/c&gt;: this client stopped reading).
+    /// Only surfaced with &lt;see cref="StreamOptions.AutoReconnect"/&gt; off; then
+    /// treat it like a drop: reopen after &lt;see cref="RetryAfterMs"/&gt; and catch up.
+    /// &lt;/summary&gt;
+    public sealed class ChatCloseEvent
+    {
+        /// &lt;summary&gt;&lt;c&gt;shutdown&lt;/c&gt;, &lt;c&gt;rebalance&lt;/c&gt; or &lt;c&gt;slow_consumer&lt;/c&gt; (empty from older servers).&lt;/summary&gt;
+        [JsonProperty("reason")] public string Reason { get; set; } = string.Empty;
+        /// &lt;summary&gt;How long to wait before reopening, in ms (0 when the server sent none).&lt;/summary&gt;
+        [JsonProperty("retryAfterMs")] public long RetryAfterMs { get; set; }
+    }
+
+    /// &lt;summary&gt;
+    /// Handle to the player's live chat stream: one SSE connection carrying
+    /// every conversation in their inbox plus the public channels it was
+    /// opened with. Hook the typed callbacks (best inside the
+    /// &lt;c&gt;configure&lt;/c&gt; argument of &lt;see cref="ChatClient.LiveAsync"/&gt;, so
+    /// nothing fires before they're set) and call &lt;see cref="CancelAsync"/&gt;
+    /// to stop.
+    ///
+    /// &lt;para&gt;
+    /// Callbacks fire on the HTTP background thread. In Unity, marshal to
+    /// the main thread before touching &lt;c&gt;UnityEngine&lt;/c&gt; APIs.
+    /// &lt;/para&gt;
+    ///
+    /// &lt;para&gt;
+    /// The stream reconnects on its own (&lt;see cref="StreamOptions.AutoReconnect"/&gt;,
+    /// on by default): after a server &lt;c&gt;close&lt;/c&gt;, a drop, a busy server or
+    /// 40 s of silence it waits, reopens, and once the new connection is
+    /// &lt;c&gt;ready&lt;/c&gt; catches up every followed conversation
+    /// (&lt;c&gt;Chat.MessagesAsync(id, after: lastSeq)&lt;/c&gt;; quiet ones from
+    /// &lt;see cref="ChatStreamReady.LastSeqs"/&gt;, ones added meanwhile from the
+    /// start), delivering the missed
+    /// messages through &lt;see cref="OnMessage"/&gt; before any live event, never
+    /// twice. &lt;see cref="OnConnection"/&gt; reports &lt;c&gt;Reconnecting&lt;/c&gt; /
+    /// &lt;c&gt;Connected&lt;/c&gt;; &lt;see cref="OnClose"/&gt; and transport errors don't fire.
+    /// With &lt;c&gt;AutoReconnect = false&lt;/c&gt; the stream is one connection: on
+    /// &lt;see cref="OnClose"/&gt; or &lt;see cref="OnError"/&gt;, reopen after a backoff
+    /// and catch up yourself.
+    /// &lt;/para&gt;
+    /// &lt;/summary&gt;
+    public sealed class ChatStream : IDisposable
+    {
+        private static readonly JsonSerializer PlainJson = JsonSerializer.Create();
+        private readonly CancellationTokenSource _cts;
+        private readonly HttpResponseMessage? _response;
+        private Task _readLoop = Task.CompletedTask;
+        private int _disposed;
+        // Auto-reconnect only: the catch-up fetch and the last seq known per
+        // conversation (dedupe + where each catch-up starts), guarded by
+        // _lastSeq. _ready is the latest connection's `ready`; _seeded turns
+        // true once a `ready` seeded the cursors from `lastSeqs` (after that,
+        // a followed conversation without a cursor is new).
+        private readonly Func&lt;string, long, CancellationToken, Task&lt;ChatMessagePage&gt;&gt;? _fetchAfter;
+        private readonly Dictionary&lt;string, long&gt; _lastSeq = new();
+        private ChatStreamReady? _ready;
+        private bool _seeded;
+
+        /// &lt;summary&gt;Every event, raw, including kinds this SDK version doesn't model.&lt;/summary&gt;
+        public Action&lt;ChatStreamEvent&gt;? OnEvent { get; set; }
+        public Action&lt;ChatStreamReady&gt;? OnReady { get; set; }
+        /// &lt;summary&gt;A new message, text already resolved for this player.&lt;/summary&gt;
+        public Action&lt;ChatMessage&gt;? OnMessage { get; set; }
+        /// &lt;summary&gt;A message was edited: the full updated message (&lt;see cref="ChatMessage.EditedAt"/&gt; set); replace it by &lt;c&gt;MessageId&lt;/c&gt;.&lt;/summary&gt;
+        public Action&lt;ChatMessage&gt;? OnMessageEdited { get; set; }
+        public Action&lt;ChatMessageDeletedEvent&gt;? OnMessageDeleted { get; set; }
+        public Action&lt;ChatTypingEvent&gt;? OnTyping { get; set; }
+        public Action&lt;ChatReadEvent&gt;? OnRead { get; set; }
+        public Action&lt;ChatConversationAddedEvent&gt;? OnConversationAdded { get; set; }
+        public Action&lt;ChatConversationUpdatedEvent&gt;? OnConversationUpdated { get; set; }
+        public Action&lt;ChatConversationRemovedEvent&gt;? OnConversationRemoved { get; set; }
+        public Action&lt;ChatRestrictionEvent&gt;? OnRestriction { get; set; }
+        public Action&lt;ChatRestrictionLiftedEvent&gt;? OnRestrictionLifted { get; set; }
+        /// &lt;summary&gt;
+        /// Only with &lt;see cref="StreamOptions.AutoReconnect"/&gt; off: the server is
+        /// closing the stream (&lt;c&gt;shutdown&lt;/c&gt;, &lt;c&gt;rebalance&lt;/c&gt;, &lt;c&gt;slow_consumer&lt;/c&gt;);
+        /// reopen it after &lt;see cref="ChatCloseEvent.RetryAfterMs"/&gt; and catch up.
+        /// &lt;/summary&gt;
+        public Action&lt;ChatCloseEvent&gt;? OnClose { get; set; }
+        /// &lt;summary&gt;
+        /// Parse failures and exceptions thrown by your callbacks. With
+        /// auto-reconnect, also the error that stopped the stream for good (a
+        /// refused reopen: 401, 403 &lt;c&gt;chat_disabled&lt;/c&gt;, 404, …); drops are
+        /// handled for you. Without it, transport failures too.
+        /// &lt;/summary&gt;
+        public Action&lt;Exception&gt;? OnError { get; set; }
+        /// &lt;summary&gt;
+        /// Auto-reconnect status: &lt;c&gt;Connected&lt;/c&gt; after every successful
+        /// connect (after &lt;c&gt;ready&lt;/c&gt; and the catch-up, the first connect
+        /// included), &lt;c&gt;Reconnecting&lt;/c&gt; (with reason, delay, attempt) each
+        /// time the connection is lost. Not an error; use it for a
+        /// "reconnecting…" badge.
+        /// &lt;/summary&gt;
+        public Action&lt;StreamConnectionEvent&gt;? OnConnection { get; set; }
+
+        /// &lt;summary&gt;The &lt;c&gt;ready&lt;/c&gt; payload of the current connection once it arrived (null before).&lt;/summary&gt;
+        public ChatStreamReady? Ready { get; private set; }
+
+        /// &lt;summary&gt;True when this stream reconnects on its own (&lt;see cref="StreamOptions.AutoReconnect"/&gt;).&lt;/summary&gt;
+        public bool AutoReconnect =&gt; _fetchAfter != null;
+
+        internal ChatStream(HttpResponseMessage response, CancellationTokenSource cts)
+        {
+            _response = response;
+            _cts = cts;
+        }
+
+        internal ChatStream(CancellationTokenSource cts, Func&lt;string, long, CancellationToken, Task&lt;ChatMessagePage&gt;&gt; fetchAfter)
+        {
+            _cts = cts;
+            _fetchAfter = fetchAfter;
+        }
+
+        internal void Start(Func&lt;ChatStream, Task&gt; startReadLoop)
+        {
+            // Runs on the threadpool until the server closes the stream OR
+            // the consumer cancels.
+            _readLoop = Task.Run(() =&gt; startReadLoop(this));
+        }
+
+        /// &lt;summary&gt;Cancels the subscription + closes the HTTP socket. Idempotent.&lt;/summary&gt;
+        public async Task CancelAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
+            try { _cts.Cancel(); } catch { /* swallow */ }
+            try { await _readLoop.ConfigureAwait(false); } catch { /* swallow */ }
+            try { _response?.Dispose(); } catch { /* swallow */ }
+            try { _cts.Dispose(); } catch { /* swallow */ }
+        }
+
+        public void Dispose()
+        {
+            _ = CancelAsync();
+        }
+
+        internal void Dispatch(string kind, Dictionary&lt;string, JToken&gt; data)
+        {
+            if (AutoReconnect &amp;&amp; !Track(kind, data)) return;
+            try
+            {
+                OnEvent?.Invoke(new ChatStreamEvent(kind, data));
+                switch (kind)
+                {
+                    case ChatStreamEventKind.Ready:
+                        var ready = As&lt;ChatStreamReady&gt;(data);
+                        Ready = ready;
+                        OnReady?.Invoke(ready);
+                        break;
+                    case ChatStreamEventKind.Message:
+                        OnMessage?.Invoke(As&lt;ChatMessage&gt;(data));
+                        break;
+                    case ChatStreamEventKind.MessageEdited:
+                        OnMessageEdited?.Invoke(As&lt;ChatMessage&gt;(data));
+                        break;
+                    case ChatStreamEventKind.MessageDeleted:
+                        OnMessageDeleted?.Invoke(As&lt;ChatMessageDeletedEvent&gt;(data));
+                        break;
+                    case ChatStreamEventKind.Typing:
+                        OnTyping?.Invoke(As&lt;ChatTypingEvent&gt;(data));
+                        break;
+                    case ChatStreamEventKind.Read:
+                        OnRead?.Invoke(As&lt;ChatReadEvent&gt;(data));
+                        break;
+                    case ChatStreamEventKind.ConversationAdded:
+                        OnConversationAdded?.Invoke(As&lt;ChatConversationAddedEvent&gt;(data));
+                        break;
+                    case ChatStreamEventKind.ConversationUpdated:
+                        OnConversationUpdated?.Invoke(As&lt;ChatConversationUpdatedEvent&gt;(data));
+                        break;
+                    case ChatStreamEventKind.ConversationRemoved:
+                        OnConversationRemoved?.Invoke(As&lt;ChatConversationRemovedEvent&gt;(data));
+                        break;
+                    case ChatStreamEventKind.Restriction:
+                        OnRestriction?.Invoke(As&lt;ChatRestrictionEvent&gt;(data));
+                        break;
+                    case ChatStreamEventKind.RestrictionLifted:
+                        OnRestrictionLifted?.Invoke(As&lt;ChatRestrictionLiftedEvent&gt;(data));
+                        break;
+                    case ChatStreamEventKind.Close:
+                        OnClose?.Invoke(As&lt;ChatCloseEvent&gt;(data));
+                        break;
+                }
+            }
+            catch (Exception err)
+            {
+                EmitError(err);
+            }
+        }
+
+        internal void EmitError(Exception err)
+        {
+            try { OnError?.Invoke(err); } catch { /* swallow */ }
+        }
+
+        internal void EmitConnection(StreamConnectionEvent ev)
+        {
+            try { OnConnection?.Invoke(ev); }
+            catch (Exception cbErr) { EmitError(cbErr); }
+        }
+
+        // Auto mode: records the last seq per conversation; false = a message
+        // already delivered (seq &lt;= last), drop it.
+        private bool Track(string kind, Dictionary&lt;string, JToken&gt; data)
+        {
+            if (kind == ChatStreamEventKind.Ready)
+            {
+                ChatStreamReady? ready;
+                try { ready = As&lt;ChatStreamReady&gt;(data); }
+                catch { ready = null; }
+                lock (_lastSeq) _ready = ready;
+                return true;
+            }
+            var conversationId = Str(data, "conversationId");
+            if (conversationId == null) return true;
+            switch (kind)
+            {
+                case ChatStreamEventKind.Message:
+                case ChatStreamEventKind.MessageDeleted:
+                    var seq = Long(data, "seq");
+                    if (seq == null) return true;
+                    lock (_lastSeq)
+                    {
+                        var known = _lastSeq.TryGetValue(conversationId, out var last);
+                        if (kind == ChatStreamEventKind.Message &amp;&amp; known &amp;&amp; seq.Value &lt;= last) return false;
+                        if (!known || seq.Value &gt; last) _lastSeq[conversationId] = seq.Value;
+                    }
+                    return true;
+                case ChatStreamEventKind.ConversationAdded:
+                    // New to the player: its whole history counts as missed on a reconnect.
+                    lock (_lastSeq)
+                    {
+                        if (!_lastSeq.ContainsKey(conversationId)) _lastSeq[conversationId] = 0;
+                    }
+                    return true;
+                case ChatStreamEventKind.ConversationRemoved:
+                    lock (_lastSeq) _lastSeq.Remove(conversationId);
+                    return true;
+                default:
+                    return true;
+            }
+        }
+
+        /// &lt;summary&gt;
+        /// After every &lt;c&gt;ready&lt;/c&gt;: the first one carrying &lt;c&gt;lastSeqs&lt;/c&gt;
+        /// seeds a cursor for every followed conversation. After a reconnect's,
+        /// page every tracked conversation forward from its last seq (a
+        /// followed one without a cursor appeared during the gap: from 0) and
+        /// deliver the missed messages as normal &lt;c&gt;message&lt;/c&gt; events. A 4xx
+        /// on one conversation drops it from the catch-up; anything else
+        /// throws, which the loop treats as a drop.
+        /// &lt;/summary&gt;
+        internal async Task CatchUpAsync(bool isReconnect, CancellationToken ct)
+        {
+            if (_fetchAfter == null) return;
+            List&lt;KeyValuePair&lt;string, long&gt;&gt; todo;
+            Dictionary&lt;string, long&gt;? heads;
+            lock (_lastSeq)
+            {
+                var ready = _ready;
+                heads = ready?.LastSeqs;
+                var seededBefore = _seeded;
+                if (heads != null &amp;&amp; !_seeded)
+                {
+                    // Every followed conversation's seq at connect time: quiet ones get a cursor too.
+                    foreach (var kv in heads)
+                    {
+                        if (!_lastSeq.ContainsKey(kv.Key)) _lastSeq[kv.Key] = kv.Value;
+                    }
+                    _seeded = true;
+                }
+                if (!isReconnect) return;
+                if (ready != null &amp;&amp; seededBefore)
+                {
+                    // Followed now but no cursor: it appeared during the gap, so its whole history is missed.
+                    var followed = (ready.ConversationIds ?? new List&lt;string&gt;())
+                        .Concat((ready.Channels ?? new List&lt;ChatStreamChannel&gt;()).Select(c =&gt; c.ConversationId))
+                        .Concat(heads?.Keys ?? Enumerable.Empty&lt;string&gt;());
+                    foreach (var id in followed)
+                    {
+                        if (!string.IsNullOrEmpty(id) &amp;&amp; !_lastSeq.ContainsKey(id)) _lastSeq[id] = 0;
+                    }
+                }
+                todo = _lastSeq.ToList();
+            }
+            foreach (var entry in todo)
+            {
+                var after = entry.Value;
+                // The server says nothing is newer than what we have: skip the request.
+                if (heads != null &amp;&amp; heads.TryGetValue(entry.Key, out var head) &amp;&amp; head &lt;= after) continue;
+                while (true)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    ChatMessagePage page;
+                    try
+                    {
+                        page = await _fetchAfter(entry.Key, after, ct).ConfigureAwait(false);
+                    }
+                    catch (KratyApiError err) when (!SseReconnectLoop.IsRetryable(err))
+                    {
+                        lock (_lastSeq) _lastSeq.Remove(entry.Key);
+                        break;
+                    }
+                    foreach (var m in page.Messages)
+                    {
+                        var dict = new Dictionary&lt;string, JToken&gt;();
+                        foreach (var prop in JObject.FromObject(m, PlainJson).Properties()) dict[prop.Name] = prop.Value;
+                        Dispatch(ChatStreamEventKind.Message, dict);
+                    }
+                    // An empty page that says HasMore (every message hidden from
+                    // this player) stops here with the cursor unchanged: the
+                    // next reconnect retries, and this never spins.
+                    if (!page.HasMore || page.Messages.Count == 0) break;
+                    after = page.Messages[page.Messages.Count - 1].Seq;
+                }
+            }
+        }
+
+        private static string? Str(Dictionary&lt;string, JToken&gt; data, string key) =&gt;
+            data.TryGetValue(key, out var v) &amp;&amp; v.Type == JTokenType.String ? (string?)v : null;
+
+        private static long? Long(Dictionary&lt;string, JToken&gt; data, string key) =&gt;
+            data.TryGetValue(key, out var v) &amp;&amp; (v.Type == JTokenType.Integer || v.Type == JTokenType.Float) ? (long)v : (long?)null;
+
+        private static T As&lt;T&gt;(Dictionary&lt;string, JToken&gt; data) where T : new()
+        {
+            var obj = new JObject();
+            foreach (var kv in data) obj[kv.Key] = kv.Value.DeepClone();
+            return obj.ToObject&lt;T&gt;() ?? new T();
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// Opens the player's chat SSE stream: one connection
+    /// (&lt;see cref="StreamOptions.AutoReconnect"/&gt; off) or the self-healing
+    /// stream run by &lt;see cref="SseReconnectLoop"/&gt;. Transport + parsing live
+    /// in &lt;see cref="SseReader"/&gt;.
+    /// &lt;/summary&gt;
+    internal static class ChatStreamFactory
+    {
+        public const string FilterHeader = "x-kraty-chat-filter";
+
+        public static async Task&lt;ChatStream&gt; OpenAsync(
+            HttpClient http,
+            string baseUrl,
+            string externalPlayerId,
+            string authHeader,
+            string? playerSecret,
+            IEnumerable&lt;string&gt;? channels,
+            string? filter,
+            Action&lt;ChatStream&gt;? configure,
+            CancellationToken cancellationToken,
+            StreamOptions? options = null,
+            Func&lt;string, long, CancellationToken, Task&lt;ChatMessagePage&gt;&gt;? fetchAfter = null
+        )
+        {
+            var query = new List&lt;string&gt;();
+            var keys = channels?.Where(c =&gt; !string.IsNullOrWhiteSpace(c)).Select(c =&gt; Uri.EscapeDataString(c.Trim())).ToList();
+            if (keys != null &amp;&amp; keys.Count &gt; 0) query.Add("channels=" + string.Join(",", keys));
+            if (filter != null) query.Add("filter=" + filter);
+            var url = $"{baseUrl}/sdk/v1/players/{Uri.EscapeDataString(externalPlayerId)}/chat/stream"
+                + (query.Count &gt; 0 ? "?" + string.Join("&amp;", query) : string.Empty);
+            var headers = filter != null ? new Dictionary&lt;string, string&gt; { [FilterHeader] = filter } : null;
+            options ??= new StreamOptions();
+
+            if (!options.AutoReconnect || fetchAfter == null)
+            {
+                var response = await SseReader.OpenAsync(
+                    http, url, authHeader, playerSecret, "chat stream", cancellationToken, headers
+                ).ConfigureAwait(false);
+
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var stream = new ChatStream(response, cts);
+                try
+                {
+                    configure?.Invoke(stream);
+                }
+                catch
+                {
+                    response.Dispose();
+                    cts.Dispose();
+                    throw;
+                }
+                stream.Start(self =&gt;
+                    SseReader.PumpAsync(response, cts, self.Dispatch, self.EmitError, rawDates: true));
+                return stream;
+            }
+
+            // Self-healing: callbacks first (so even the first `ready` /
+            // `Reconnecting` lands), then the first connect. A refusal throws
+            // as before; a transient failure starts out reconnecting.
+            var autoCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var auto = new ChatStream(autoCts, fetchAfter);
+            HttpResponseMessage? first = null;
+            Exception? firstError = null;
+            try
+            {
+                configure?.Invoke(auto);
+            }
+            catch
+            {
+                autoCts.Dispose();
+                throw;
+            }
+            try
+            {
+                first = await SseReader.OpenAsync(
+                    http, url, authHeader, playerSecret, "chat stream", cancellationToken, headers
+                ).ConfigureAwait(false);
+            }
+            catch (Exception err) when (SseReconnectLoop.IsRetryable(err) &amp;&amp; !cancellationToken.IsCancellationRequested)
+            {
+                firstError = err;
+            }
+            catch
+            {
+                autoCts.Dispose();
+                throw;
+            }
+            var loop = new SseReconnectLoop
+            {
+                Open = token =&gt; SseReader.OpenAsync(http, url, authHeader, playerSecret, "chat stream", token, headers),
+                Deliver = auto.Dispatch,
+                AfterReady = auto.CatchUpAsync,
+                Status = auto.EmitConnection,
+                Error = auto.EmitError,
+                RawDates = true,
+                Options = options,
+            };
+            auto.Start(_ =&gt; loop.RunAsync(first, firstError, autoCts.Token));
+            return auto;
+        }
+    }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

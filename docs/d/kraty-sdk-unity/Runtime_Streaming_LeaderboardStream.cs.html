@@ -1,0 +1,236 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-unity/Runtime/Streaming/LeaderboardStream.cs</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-unity/Runtime/Streaming/LeaderboardStream.cs</h1><p class=muted>kraty-sdk-unity/Runtime/Streaming/LeaderboardStream.cs</p><pre><code class="language-csharp">using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net.Http;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+
+namespace Kraty
+{
+    /// &lt;summary&gt;
+    /// One event emitted by the leaderboard SSE stream.
+    /// &lt;see cref="Kind"/&gt; is the SSE &lt;c&gt;event:&lt;/c&gt; line, typically:
+    /// &lt;list type="bullet"&gt;
+    /// &lt;item&gt;&lt;description&gt;&lt;c&gt;ready&lt;/c&gt;: handshake, sent once after the
+    /// subscription is wired. Safe to start posting progress as soon
+    /// as this lands without missing the resulting update.&lt;/description&gt;&lt;/item&gt;
+    /// &lt;item&gt;&lt;description&gt;&lt;c&gt;score_update&lt;/c&gt;: a participant's score / rank
+    /// changed; payload carries the new &lt;c&gt;rank&lt;/c&gt; + &lt;c&gt;score&lt;/c&gt; for
+    /// the affected entry.&lt;/description&gt;&lt;/item&gt;
+    /// &lt;item&gt;&lt;description&gt;&lt;c&gt;finalized&lt;/c&gt;: the board ended (a session/lobby
+    /// terminated, or the event window closed). &lt;see cref="Data"/&gt; carries
+    /// &lt;c&gt;reason&lt;/c&gt; (&lt;c&gt;session_terminated&lt;/c&gt; | &lt;c&gt;window_closed&lt;/c&gt;) and
+    /// &lt;c&gt;standings&lt;/c&gt; (a list of &lt;c&gt;{participantId, rank, score, name, kind}&lt;/c&gt;).
+    /// Find the caller by &lt;c&gt;participantId&lt;/c&gt; to show their placement, then
+    /// stop expecting &lt;c&gt;score_update&lt;/c&gt;s.&lt;/description&gt;&lt;/item&gt;
+    /// &lt;item&gt;&lt;description&gt;&lt;c&gt;closed&lt;/c&gt;: the board ended for good. After
+    /// this the stream completes (it never reconnects after &lt;c&gt;closed&lt;/c&gt;) and
+    /// &lt;see cref="LeaderboardStream.CancelAsync"/&gt; only tidies up.&lt;/description&gt;&lt;/item&gt;
+    /// &lt;/list&gt;
+    /// &lt;see cref="Data"/&gt; is the parsed &lt;c&gt;data:&lt;/c&gt; JSON line.
+    /// &lt;/summary&gt;
+    public sealed class LeaderboardStreamEvent
+    {
+        public string Kind { get; }
+        public Dictionary&lt;string, JToken&gt; Data { get; }
+
+        public LeaderboardStreamEvent(string kind, Dictionary&lt;string, JToken&gt; data)
+        {
+            Kind = kind;
+            Data = data;
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// Handle to an active SSE subscription. Hook &lt;see cref="OnEvent"/&gt;
+    /// / &lt;see cref="OnError"/&gt; before the connection is opened (or
+    /// immediately after, since events buffer until the consumer's
+    /// SynchronizationContext drains), call &lt;see cref="CancelAsync"/&gt;
+    /// to stop.
+    ///
+    /// &lt;para&gt;
+    /// Callbacks fire on the HTTP background thread. In Unity, marshal
+    /// to the main thread before touching &lt;c&gt;UnityEngine&lt;/c&gt; APIs:
+    /// &lt;/para&gt;
+    /// &lt;code&gt;
+    /// stream.OnEvent = ev =&gt; mainThreadDispatcher.Enqueue(() =&gt; Repaint(ev));
+    /// &lt;/code&gt;
+    ///
+    /// &lt;para&gt;
+    /// Reconnects on its own by default (&lt;see cref="StreamOptions.AutoReconnect"/&gt;):
+    /// after a server &lt;c&gt;close&lt;/c&gt;, a drop, a busy server or 40 s of silence
+    /// it reopens, re-delivering &lt;c&gt;ready&lt;/c&gt;; &lt;see cref="OnConnection"/&gt;
+    /// reports it. Missed &lt;c&gt;score_update&lt;/c&gt;s are not replayed: re-read the
+    /// board on &lt;c&gt;Connected&lt;/c&gt; if you need exact standings. With
+    /// &lt;c&gt;AutoReconnect = false&lt;/c&gt;, surface errors via &lt;see cref="OnError"/&gt;
+    /// and re-invoke &lt;see cref="EventLeaderboardsClient.LiveAsync"/&gt; after a
+    /// backoff yourself.
+    /// &lt;/para&gt;
+    /// &lt;/summary&gt;
+    public sealed class LeaderboardStream : IDisposable
+    {
+        private readonly CancellationTokenSource _cts;
+        private Task _readLoop = Task.CompletedTask;
+        private readonly HttpResponseMessage? _response;
+        private int _disposed;
+
+        public Action&lt;LeaderboardStreamEvent&gt;? OnEvent { get; set; }
+        /// &lt;summary&gt;
+        /// Parse failures and exceptions thrown by your callbacks. With
+        /// auto-reconnect (the default) also the error that stopped the stream
+        /// for good (a refused reopen: 401, 404, …); drops are handled for you.
+        /// Without it, transport failures too.
+        /// &lt;/summary&gt;
+        public Action&lt;Exception&gt;? OnError { get; set; }
+        /// &lt;summary&gt;
+        /// Auto-reconnect status: &lt;c&gt;Connected&lt;/c&gt; after every &lt;c&gt;ready&lt;/c&gt;,
+        /// &lt;c&gt;Reconnecting&lt;/c&gt; (reason, delay, attempt) each time the
+        /// connection is lost. Not an error.
+        /// &lt;/summary&gt;
+        public Action&lt;StreamConnectionEvent&gt;? OnConnection { get; set; }
+
+        /// &lt;summary&gt;True when this stream reconnects on its own (&lt;see cref="StreamOptions.AutoReconnect"/&gt;).&lt;/summary&gt;
+        public bool AutoReconnect { get; }
+
+        internal LeaderboardStream(HttpResponseMessage response, CancellationTokenSource cts, Func&lt;LeaderboardStream, Task&gt; startReadLoop)
+        {
+            _response = response;
+            _cts = cts;
+            // Start the read loop on the threadpool; it runs until the
+            // server closes the stream OR the consumer cancels.
+            _readLoop = Task.Run(() =&gt; startReadLoop(this));
+        }
+
+        // Auto-reconnect: the loop owns the connections; Start runs it once
+        // the caller's callbacks are wired.
+        internal LeaderboardStream(CancellationTokenSource cts)
+        {
+            _cts = cts;
+            AutoReconnect = true;
+        }
+
+        internal void Start(Func&lt;Task&gt; loop)
+        {
+            _readLoop = Task.Run(loop);
+        }
+
+        /// &lt;summary&gt;
+        /// Cancels the subscription + closes the HTTP socket. Idempotent:
+        /// safe to call after the server emits &lt;c&gt;closed&lt;/c&gt; or after
+        /// &lt;see cref="Dispose"/&gt;.
+        /// &lt;/summary&gt;
+        public async Task CancelAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
+            try { _cts.Cancel(); } catch { /* swallow */ }
+            try { await _readLoop.ConfigureAwait(false); } catch { /* swallow */ }
+            try { _response?.Dispose(); } catch { /* swallow */ }
+            try { _cts.Dispose(); } catch { /* swallow */ }
+        }
+
+        public void Dispose()
+        {
+            _ = CancelAsync();
+        }
+
+        internal void EmitEvent(LeaderboardStreamEvent ev)
+        {
+            try { OnEvent?.Invoke(ev); }
+            catch (Exception cbErr) { try { OnError?.Invoke(cbErr); } catch { /* swallow */ } }
+        }
+
+        internal void EmitError(Exception err)
+        {
+            try { OnError?.Invoke(err); } catch { /* swallow */ }
+        }
+
+        internal void EmitConnection(StreamConnectionEvent ev)
+        {
+            try { OnConnection?.Invoke(ev); }
+            catch (Exception cbErr) { EmitError(cbErr); }
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// Opens an SSE subscription to a leaderboard. Returns a
+    /// &lt;see cref="LeaderboardStream"/&gt; handle the caller drives via its
+    /// &lt;c&gt;OnEvent&lt;/c&gt; / &lt;c&gt;OnError&lt;/c&gt; / &lt;c&gt;OnConnection&lt;/c&gt; callbacks.
+    /// Auto-reconnects (see &lt;see cref="StreamOptions"/&gt;) unless told not to,
+    /// and never after &lt;c&gt;closed&lt;/c&gt; (the board ended for good).
+    ///
+    /// &lt;para&gt;
+    /// Implementation: opens a long-lived &lt;c&gt;HttpClient.SendAsync&lt;/c&gt;
+    /// with &lt;c&gt;ResponseHeadersRead&lt;/c&gt; + a manual line-by-line parser.
+    /// &lt;c&gt;\n\n&lt;/c&gt; separates events; &lt;c&gt;event:&lt;/c&gt; / &lt;c&gt;data:&lt;/c&gt; are
+    /// the keys we read. Comment lines starting with &lt;c&gt;:&lt;/c&gt; are
+    /// heartbeats (activity for the watchdog).
+    /// &lt;/para&gt;
+    /// &lt;/summary&gt;
+    internal static class LeaderboardStreamFactory
+    {
+        public static async Task&lt;LeaderboardStream&gt; OpenAsync(
+            HttpClient http,
+            string baseUrl,
+            string leaderboardId,
+            string authHeader,
+            string? playerSecret,
+            CancellationToken cancellationToken,
+            StreamOptions? options = null,
+            Action&lt;LeaderboardStream&gt;? configure = null
+        )
+        {
+            var url = $"{baseUrl}/sdk/v1/event-leaderboards/{Uri.EscapeDataString(leaderboardId)}/stream";
+            options ??= new StreamOptions();
+            Task&lt;HttpResponseMessage&gt; Open(CancellationToken token) =&gt;
+                SseReader.OpenAsync(http, url, authHeader, playerSecret, "leaderboard stream", token);
+
+            if (!options.AutoReconnect)
+            {
+                var response = await Open(cancellationToken).ConfigureAwait(false);
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var single = new LeaderboardStream(response, cts, (self) =&gt;
+                    SseReader.PumpAsync(
+                        response,
+                        cts,
+                        (kind, data) =&gt; self.EmitEvent(new LeaderboardStreamEvent(kind, data)),
+                        self.EmitError
+                    )
+                );
+                configure?.Invoke(single);
+                return single;
+            }
+
+            var autoCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var stream = new LeaderboardStream(autoCts);
+            (HttpResponseMessage? Response, Exception? Error) first;
+            try
+            {
+                configure?.Invoke(stream);
+                first = await SseReconnectLoop.OpenFirstAsync(Open, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                autoCts.Dispose();
+                throw;
+            }
+            var loop = new SseReconnectLoop
+            {
+                Open = Open,
+                Deliver = (kind, data) =&gt; stream.EmitEvent(new LeaderboardStreamEvent(kind, data)),
+                // `closed`: the board ended (finalized); there's nothing to reopen.
+                IsFinal = kind =&gt; kind == "closed",
+                Status = stream.EmitConnection,
+                Error = stream.EmitError,
+                Options = options,
+            };
+            stream.Start(() =&gt; loop.RunAsync(first.Response, first.Error, autoCts.Token));
+            return stream;
+        }
+    }
+}
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>

@@ -1,0 +1,435 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>kraty-sdk-unity/SCHEMA.md</title>
+<style>body{font:15px/1.6 ui-sans-serif,system-ui;max-width:980px;margin:0 auto;padding:24px;color:#111}h1,h2{line-height:1.25}pre{background:#f4f4f7;padding:12px;overflow:auto;border-radius:6px;font-size:13px}a{color:#0a58ca}.muted{color:#666}nav a{margin-right:14px}</style></head>
+<body><nav><a href=index.html>index</a><a href=https://github.com/Kraty-Org>github</a></nav><h1>kraty-sdk-unity/SCHEMA.md</h1><p class=muted>kraty-sdk-unity/SCHEMA.md</p><pre><code class="language-markdown"># Kraty Unity SDK: public surface (v0.6.0)
+
+Canonical method + type listing for `app.kraty.sdk`. Update this file in
+the same commit as any signature change so a single grep tells you
+exactly what's available.
+
+All methods sit on the `Kraty` facade unless noted otherwise. Every
+async method takes an optional trailing `CancellationToken ct = default`.
+
+## `Kraty` facade
+
+```csharp
+Kraty(KratyClientOptions opts)
+void Dispose()
+
+string? ActiveExternalPlayerId { get; }
+Task&lt;(string ExternalPlayerId, string Secret)&gt; EnsureIdentityAsync(CancellationToken ct = default)
+Task LogoutAsync(CancellationToken ct = default)
+Task SignInAsync(string externalPlayerId, string secret, CancellationToken ct = default)
+
+// Finalization catch-up (docs/05b). Fires exactly once per board across the
+// live SSE `finalized` event AND boards that ended while the player was away.
+Action OnFinalized(Action&lt;FinalizationResult&gt; cb)         // returns unsubscribe
+Task&lt;List&lt;FinalizationResult&gt;&gt; CheckFinalizationsAsync()  // call on app foreground/reconnect
+Task DismissAsync(MembershipRef ref)                      // ack one handled result
+Task&lt;int&gt; ClearReportedAsync()                            // bulk-drop delivered entries
+
+// Static identity helpers
+static Task&lt;StoredIdentity?&gt; ReadStoredIdentityAsync(ISecretStore secretStore, CancellationToken ct = default)
+static Task RestoreStoredIdentityAsync(KratyClient client, StoredIdentity identity, ISecretStore secretStore, CancellationToken ct = default)
+static Task ClearStoredIdentityAsync(ISecretStore secretStore, CancellationToken ct = default)
+static Task&lt;Kraty&gt; ConnectAsPlayerAsync(KratyClientOptions opts, string? externalPlayerId, ISecretStore secretStore, bool autoRotateOnConflict = false, CancellationToken ct = default)
+```
+
+## `kraty.Events`: `EventsClient`
+
+```csharp
+Task&lt;List&lt;EventListing&gt;&gt; ListForPlayerAsync(string? @as = null, CancellationToken ct = default)
+Task&lt;StartAttemptResponse&gt; StartAsync(string eventKey, Dictionary&lt;string, object?&gt;? playerContext = null, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
+Task&lt;ProgressResult&gt; ProgressAsync(string eventKey, string attemptId, ProgressInput input, string? @as = null, CancellationToken ct = default)
+
+// Co-op team events (listing / start / progress / finish also carry `Teams`; the listing carries `TeamFormation` and `TeamOptions`;
+// ProgressInput.EventTeamId names a partner bar)
+Task&lt;EventTeamMembersPage&gt; TeamMembersAsync(string eventTeamId, string? cursor = null, int? limit = null, string? @as = null, CancellationToken ct = default)
+Task&lt;TeamMatchResult&gt; MatchTeamAsync(string eventKey, string? @as = null, CancellationToken ct = default)
+Task&lt;PartnerInvite&gt; InvitePartnerAsync(string eventKey, string? externalPlayerId = null, string? friendCode = null, string? @as = null, CancellationToken ct = default)
+Task&lt;List&lt;PartnerInvite&gt;&gt; PartnerInvitesAsync(string eventKey, string direction = "in", string? @as = null, CancellationToken ct = default)
+Task&lt;PartnerInvite&gt; AcceptInviteAsync(string eventKey, string eventTeamId, string? @as = null, CancellationToken ct = default)
+Task&lt;PartnerInvite&gt; DeclineInviteAsync(string eventKey, string eventTeamId, string? @as = null, CancellationToken ct = default)
+Task&lt;PartnerInvite&gt; CancelInviteAsync(string eventKey, string eventTeamId, string? @as = null, CancellationToken ct = default)
+Task&lt;RandomPartnerResult&gt; RandomPartnerAsync(string eventKey, string? @as = null, CancellationToken ct = default)
+Task&lt;List&lt;PartnerSuggestion&gt;&gt; PartnerSuggestionsAsync(string eventKey, int? limit = null, string? @as = null, CancellationToken ct = default)
+```
+
+## `kraty.Leaderboards`: `LeaderboardsClient`
+
+The dashboard-configured cross-event boards (weekly / monthly /
+all-time, optionally segmented). Addressed by stable game-scoped
+**key**. Wire endpoints:
+
+- `GET /sdk/v1/leaderboards` (list the game's boards)
+- `GET /sdk/v1/leaderboards/:key`
+- `GET /sdk/v1/leaderboards/:key/standings`
+- `GET /sdk/v1/leaderboards/:key/periods`
+- `POST /sdk/v1/players/:externalId/leaderboards/:key/join`
+- `POST /sdk/v1/players/:externalId/leaderboards/:key/score`
+
+```csharp
+Task&lt;List&lt;LeaderboardSummary&gt;&gt; ListAsync(CancellationToken ct = default)
+Task&lt;Leaderboard&gt;            ReadAsync(string key, LeaderboardReadOptions? opts = null, CancellationToken ct = default)
+Task&lt;Leaderboard&gt;            JoinAsync(string key, LeaderboardJoinOptions? opts = null, CancellationToken ct = default)
+Task&lt;BoardStandings&gt;         StandingsAsync(string key, StandingsReadOptions? opts = null, CancellationToken ct = default)
+Task&lt;LeaderboardScoreResult&gt; SubmitScoreAsync(string key, double value, LeaderboardSubmitOptions? opts = null, CancellationToken ct = default)
+Task&lt;LeaderboardPeriods&gt;     ListPeriodsAsync(string key, int? limit = null, CancellationToken ct = default)
+```
+
+`LeaderboardReadOptions`:
+- `int? Limit`: 1–200, default 50 server-side
+- `string? Segment`: bucket value; required only for `context` segmentation. Leave null for `progression`-segmented boards (server derives the caller's division); unsegmented boards ignore it
+- `string? Period`: `"current"` (default) or an ISO timestamp from `LeaderboardPeriod.PeriodStartedAt`
+- `bool IncludeSelf`: when true, response includes `self: { rank, score }` (live periods only)
+- `string? ExternalId`: required when `IncludeSelf` is true; lazily resolved from the active player otherwise
+
+`JoinAsync`: add the active player to the board at score 0 without submitting a score, and return the current standings. Idempotent (never resets an existing score). Response `Joined = true`. `LeaderboardJoinOptions`:
+- `int? Limit`: 1–200, default 50 server-side
+- `string? Segment`: bucket value for `context` boards; leave null for `progression` boards (server derives the division from the caller's balance)
+- `string? ExternalId`: address a different player (server-side tooling only); lazily resolved otherwise
+
+`StandingsAsync`: multi-segment read. Returns one `StandingsSegment` block per segment picked by `StandingsReadOptions.Scope`. `StandingsReadOptions`:
+- `string? Scope`: `"self_segment"`, `"mine"`, `"segment"`, `"all"` (default `"all"`)
+- `string? Segment`: required when `Scope == "segment"` on a segmented board
+- `string? Period`: `"current"` (default) or an ISO timestamp from `ListPeriodsAsync`
+- `string? ExternalId`: flags `isSelf` / `selfRank`; auto-resolved for `self_segment` / `mine`
+- `int? Limit`: per-segment top-N (1..200, default 50)
+- `int? MaxSegments`: cap on returned segment blocks (1..100, default 20)
+
+`BoardStandings`: `key`, `leaderboardId`, `scope`, `resetCadence`, `scoreAggregation`, `period`, `List&lt;StandingsSegment&gt; Segments`, `bool SegmentsTruncated`.
+`StandingsSegment`: `string? Segment`, `bool Participated`, `int? SelfRank`, `List&lt;LeaderboardEntry&gt; Entries`.
+
+`SubmitScoreAsync`: submit a score for the active player directly to the board, outside an event attempt. Errors: `client_scoring_disabled` (403, board is server-only), `score_not_supported` (400, progression-ranked board), `not_found` (404), `validation_failed` (400). `LeaderboardSubmitOptions`:
+- `string? Segment`: required only for `context` segmentation; null for `progression` boards (server derives the division); unsegmented boards ignore it
+- `string? IdempotencyKey`: auto-stamped when null
+- `string? ExternalId`: address a different player (server-side tooling only); lazily resolved otherwise
+
+`LeaderboardScoreResult`:
+- `string LeaderboardId`
+- `double Score`
+- `int? Rank`
+
+## `kraty.EventLeaderboards`: `EventLeaderboardsClient`
+
+The auto-generated per-event-window leaderboard. Addressed by the
+**UUID** returned in `Events.StartAsync(...)`'s
+`attempt.leaderboardId`. Includes Server-Sent Events live streaming.
+Wire endpoints:
+
+- `GET /sdk/v1/event-leaderboards/:id`
+- `GET /sdk/v1/event-leaderboards/:id/stream`
+
+```csharp
+Task&lt;EventLeaderboard&gt;          ReadAsync(string leaderboardId, EventLeaderboardReadOptions? opts = null, CancellationToken ct = default)
+Task&lt;LeaderboardStream&gt;         LiveAsync(string leaderboardId, CancellationToken ct = default)
+LiveLeaderboardSubscription     Subscribe(string leaderboardId, Action&lt;LeaderboardStreamEvent&gt; onEvent, SubscribeOptions? opts = null)
+```
+
+`EventLeaderboardReadOptions`:
+- `int? Limit`: 1–200, default 50 server-side
+- `bool IncludeSelf`
+- `string? ExternalId`
+
+`SubscribeOptions`:
+- `int PollIntervalMs`: default 15_000; 0 disables polling (SSE-only)
+- `Action&lt;Exception&gt;? OnError`
+
+`Leaderboard` and `EventLeaderboard` reads also carry `ProgressionLimits? Progression` — the resolved promotion/relegation cutoffs for the caller's division (`Promotion` / `Relegation`, each `{ int Places; string ItemKey }` or null; a per-division override wins over the global ladder) — so a client renders "top N promote / bottom N relegate" from server config. `EventLeaderboard` read response includes `bool Finalized` and, when finalized, `string? FinalizedReason` (`session_terminated` \| `window_closed`), which powers the finalization catch-up's session-vs-window distinction. `FinalizationResult` = `{ MembershipRef Ref; string Reason; SelfEntry? Self; IReadOnlyList&lt;FinalStanding&gt;? Standings; string? EventKey }`; `Reason` uses the `FinalizationReason` consts (`SessionTerminated` \| `WindowClosed` \| `PeriodRolled` \| `Finalized`). Registry persistence is injectable via `KratyClientOptions.MembershipStore` (`PlayerPrefsMembershipStore` in Unity, `InMemoryMembershipStore` otherwise).
+
+`LiveLeaderboardSubscription` exposes `Task CancelAsync()` /
+`void Dispose()`. Callbacks fire on the HTTP background thread, so
+marshal to Unity's main thread before touching `UnityEngine` APIs.
+
+## `kraty.Grants`: `GrantsClient`
+
+```csharp
+Task&lt;List&lt;Grant&gt;&gt;       ListPendingAsync(int? limit = null, string? @as = null, CancellationToken ct = default)
+Task&lt;Grant&gt;             ClaimAsync(string grantId, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
+Task&lt;OpenCrateResponse&gt; OpenAsync(string grantId, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
+Task&lt;CollectAllResult&gt;  CollectAllAsync(string? @as = null, CancellationToken ct = default)
+```
+
+`CollectAllResult` carries:
+- `List&lt;Grant&gt; Opened`: crate grants whose contents were rolled
+- `List&lt;Grant&gt; Claimed`: reward grants flipped to claimed
+- `List&lt;CollectAllFailure&gt; Failures`: per-grant errors that didn't abort the sweep
+- `bool HasFailures =&gt; Failures.Count &gt; 0`
+
+## `kraty.Lobbies`: `LobbiesClient`
+
+```csharp
+Task&lt;Lobby&gt; ReadAsync(string lobbyId, CancellationToken ct = default)
+```
+
+## `kraty.Inventory`: `InventoryClient`
+
+```csharp
+Task&lt;List&lt;PlayerItemHolding&gt;&gt; ListAsync(string? @as = null, CancellationToken ct = default)
+Task&lt;ConsumeItemResult&gt;       ConsumeAsync(string itemKey, ConsumeItemInput input, string? @as = null, CancellationToken ct = default)
+```
+
+## `kraty.Wallet`: `WalletClient`
+
+```csharp
+Task&lt;List&lt;PlayerWalletHolding&gt;&gt; ListAsync(string? @as = null, CancellationToken ct = default)
+Task&lt;DebitWalletResult&gt;         DebitAsync(string economyKey, DebitWalletInput input, string? @as = null, CancellationToken ct = default)
+```
+
+## `kraty.DailyLogin`: `DailyLoginClient`
+
+```csharp
+Task&lt;DailyLogin?&gt; ReadAsync(string? @as = null, CancellationToken ct = default)
+```
+
+`GET /sdk/v1/players/:p/daily-login`. The game's daily login calendar:
+`Days[{ Day, Entries }]`, `AfterLastDay`, `LoginStreak`, `CurrentDay`,
+`PaidToday`, `TodayGrantId`, `NextDayAt`, `ItemKey`. `null` when the game
+has none or it is off for the key's environment. Read-only: the request's
+session is what pays today's reward (a `daily_login` grant).
+
+## `kraty.Offers`: `OffersClient`
+
+```csharp
+Task&lt;List&lt;Offer&gt;&gt; ListAsync(int? limit = null, int? level = null, string? @as = null, CancellationToken ct = default)
+Task&lt;OfferImpressionResult&gt; MarkShownAsync(string instanceId, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
+Task&lt;Offer&gt; DismissAsync(string instanceId, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
+Task&lt;OfferTriggerResult&gt; TriggerAsync(OfferTriggerInput input, Dictionary&lt;string, object?&gt;? playerContext = null, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
+Task&lt;OfferClaimResult&gt; ClaimAsync(string instanceId, int tier, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
+static bool TryReadClaimRefusal(KratyApiError error, out string reason, out Offer? offer)
+
+// OfferTriggerInput factories
+static OfferTriggerInput FailEvent(string key, int? consecutive = null)
+static OfferTriggerInput ResourceDepleted(string resource, int required, int available, int? secondsToRegen = null)
+static OfferTriggerInput LevelReached(int level)
+```
+
+`GET /sdk/v1/players/:p/offers` (`limit` ≤ 20, default 10; `level` for
+`level_reached` offers), `POST …/offers/:instanceId/impression`, `…/dismiss`
+and `…/offers/triggers` (docs/26). Listing is not an impression: call
+`MarkShownAsync` when the offer is on screen (it starts a `first_shown`
+timer). The SDK generates `idempotencyKey` when omitted. Sell
+`offer.Current.Skus[store]` and pass `offer.InstanceId` as
+`TrackPurchaseInput.OfferInstanceId`; when `result.Offer.StudioFulfils` is
+true (the default) the game delivers `result.Offer.Contents` itself.
+`TriggerAsync` answers the newly armed offers that can be shown now (empty
+when none did). Win-back offers need no call.
+
+Free chain tiers: `OfferTier.Type` is `paid` or `free` (`IsFree`). A free
+tier has `StoreProductKey == ""` (null on the wire, kept non-null so the
+field isn't breaking), empty `Skus` and `ReferencePriceMinor == 0`; never
+send it to a store. `ClaimAsync` is `POST …/offers/:instanceId/claim` with
+`{ idempotencyKey, tier }` (`tier` = the `offer.Tier` the player tapped)
+and answers `OfferClaimResult { Claim: OfferClaim, Offer }`: the chain moves
+to the next tier (its timer starts now) or completes. When
+`Claim.StudioFulfils` is true (the default) the game delivers
+`Claim.Contents`. A refusal throws `KratyApiError` (`Code == "conflict"`);
+`OffersClient.TryReadClaimRefusal` gives its reason (`tier_changed`,
+`tier_not_free`, `offer_closed`) and the offer now. Builds on an older SDK
+can't claim free steps (their store call fails; nothing is charged).
+
+Revision 4 (docs/26 § 13): `Offer.VariantKey` is the A/B variant this player
+sees (`Current`, `Next` and `Presentation` already reflect it; null for the
+base config); `Offer.LinkedEventKey` is the linked event's key (show the sale
+on that event's screen), else null. `OfferClaim.VariantKey` and
+`PurchaseOfferResult.VariantKey` name the variant claimed or sold.
+`OfferImpressionResult.CappedReason` (`offer_cycle`, `offer_day`,
+`global_session`, `global_day`, `global_gap`) and `RetryAt` explain a
+refused impression; respect `Capped`. Re-rendering an offer already shown this
+session is never refused by the game-wide caps.
+
+## Store transaction ids (static)
+
+```csharp
+StoreTransactions.CanonicalId(string store, string? transactionId = null, string? orderId = null, string? purchaseToken = null)
+StoreTransactions.FromUnityIap(string store, string transactionId, string? receipt)   // Unity IAP Product.transactionID + .receipt
+```
+
+The `transactionId` client and server must both report: StoreKit 2
+`transactionId` on the App Store, the `orderId` (`GPA.…`) on Google Play
+(read from the Unity receipt JSON; the purchase token only without one),
+other stores unchanged.
+
+## `kraty.Guilds`: `GuildsClient`
+
+```csharp
+Task&lt;GuildClientConfig&gt; ConfigAsync(string? @as = null, CancellationToken ct = default)
+Task&lt;MyGuild?&gt; MineAsync(...)
+Task&lt;GuildDetail&gt; GetAsync(string guildId, ...)
+Task&lt;List&lt;GuildSummary&gt;&gt; SearchAsync(string query, string? country = null, int? limit = null, ...)
+Task&lt;GuildSearchPage&gt; SearchPageAsync(string query, string? country = null, int? limit = null, int? offset = null, ...) // { Guilds, NextOffset }
+Task&lt;List&lt;RecommendedGuild&gt;&gt; RecommendedAsync(string? country = null, int? limit = null, ...)
+Task&lt;MyGuild&gt; CreateAsync(GuildProfileInput input, ...)
+Task&lt;GuildJoinResult&gt; JoinAsync(string guildId, string? message = null, ...)
+Task&lt;List&lt;GuildJoinRequest&gt;&gt; MyRequestsAsync(...)
+Task CancelRequestAsync(string requestId, ...)
+Task&lt;GuildDetail&gt; UpdateProfileAsync(GuildProfileInput patch, ...)
+Task&lt;GuildLeaveResult&gt; LeaveAsync(...)
+Task&lt;List&lt;GuildJoinRequest&gt;&gt; RequestsAsync(...)
+Task&lt;GuildDetail&gt; AcceptRequestAsync(string requestId, ...)
+Task DeclineRequestAsync(string requestId, ...)
+Task&lt;GuildDetail&gt; KickAsync / PromoteAsync / DemoteAsync(string memberExternalId, ...)
+Task&lt;GuildDetail&gt; TransferLeadershipAsync(string memberExternalId, ...)
+Task&lt;GuildHelpOverview&gt; HelpAsync(...)
+Task&lt;GuildHelpRequest&gt; RequestHelpAsync(string type, string resourceKey, int amount, ...)
+Task&lt;GuildHelpDonation&gt; DonateAsync(string requestId, int? amount = null, ...)
+Task&lt;GuildHelpRequest&gt; CancelHelpAsync(string requestId, ...)
+```
+
+`/sdk/v1/players/:p/guild*` and `/guilds*` (docs/25). Every method ends with
+`string? @as = null, CancellationToken ct = default`.
+
+## `kraty.Chat`: `ChatClient`
+
+```csharp
+Task&lt;ChatClientConfig&gt; ConfigAsync(...)                         // kinds, channels, message rules, rate limit, Preferences, Status
+Task&lt;ChatPreferences&gt; PreferencesAsync(...)
+Task&lt;ChatPreferences&gt; SetPreferencesAsync(ChatPreferencesUpdate update, ...)   // only assigned props sent; ProfanityFilter = null clears
+Task&lt;ChatConversationPage&gt; ConversationsAsync(string? kind = null, int? limit = null, int? offset = null, ...) // { Conversations, NextOffset }
+Task&lt;ChatUnread&gt; UnreadAsync(...)                               // { Total, Conversations, ByKind }
+Task&lt;ChatConversation&gt; ConversationAsync(string conversationId, ...)          // Members set for groups
+Task&lt;ChatConversation&gt; OpenDirectAsync(string? externalPlayerId = null, string? friendCode = null, ...) // exactly one
+Task&lt;ChatConversation&gt; CreateGroupAsync(string title, IEnumerable&lt;string&gt;? externalPlayerIds = null, Dictionary&lt;string, object?&gt;? metadata = null, ...)
+Task&lt;ChatConversation&gt; UpdateGroupAsync(string conversationId, string? title = null, Dictionary&lt;string, object?&gt;? metadata = null, ...)
+Task&lt;ChatConversation&gt; AddMembersAsync(string conversationId, IEnumerable&lt;string&gt; externalPlayerIds, ...)
+Task&lt;ChatMemberRemoved&gt; RemoveMemberAsync(string conversationId, string externalPlayerId, ...)
+Task&lt;ChatConversation&gt; SetRoleAsync(string conversationId, string externalPlayerId, string role, ...) // owner | admin | member
+Task&lt;ChatLeaveResult&gt; LeaveAsync(string conversationId, ...)
+Task&lt;ChatConversation&gt; GuildAsync(...)                          // 409 conflict when guildless
+Task&lt;List&lt;ChatConversation&gt;&gt; ChannelsAsync(...)
+Task&lt;ChatConversation&gt; ChannelAsync(string channelKey, ...)
+Task&lt;ChatMessagePage&gt; MessagesAsync(string conversationId, long? before = null, long? after = null, int? limit = null, ...) // oldest→newest; { Messages, HasMore }
+Task&lt;ChatMessage&gt; SendAsync(string conversationId, string text, string? replyToId = null, string? clientMessageId = null, ...)
+Task&lt;ChatMessage&gt; SendCustomAsync(string conversationId, string customType, object? payload, string? text = null, string? replyToId = null, string? clientMessageId = null, ...)
+Task&lt;ChatMessage&gt; EditMessageAsync(string conversationId, string messageId, string text, ...) // own message, within Messages.EditWindowSeconds
+Task&lt;ChatMessageDeleted&gt; DeleteMessageAsync(string conversationId, string messageId, ...)
+Task&lt;ChatReadResult&gt; MarkReadAsync(string conversationId, long seq, ...)      // { LastReadSeq }
+Task TypingAsync(string conversationId, ...)
+Task&lt;ChatConversation&gt; SetConversationSettingsAsync(string conversationId, ChatConversationSettings settings, ...) // MutedUntil (null = unmute), Hidden
+Task&lt;ChatStream&gt; LiveAsync(IEnumerable&lt;string&gt;? channels = null, Action&lt;ChatStream&gt;? configure = null, ...)
+```
+
+`/sdk/v1/players/:p/chat/*` (docs/26). Every method ends with
+`string? @as = null, CancellationToken ct = default`. Chat off for the game =
+`KratyApiError` `403 chat_disabled`. `SendAsync` / `SendCustomAsync` fill
+`clientMessageId` with a fresh GUID when you pass none, so a retried send is
+idempotent. `payload` / `metadata` keep their keys exactly (no camelCasing).
+`EditMessageAsync` (`PATCH .../messages/:messageId` `{ text }`) edits your own
+message while `ChatClientConfig.Messages.EditWindowSeconds` (0 = editing off)
+has not elapsed; the result has `ChatMessage.EditedAt` (ISO string, null =
+never edited) set. Otherwise `403 chat_edit_not_allowed`; the filter and
+`chat_message_rejected` / `chat_message_invalid` / 429 behave as on send.
+
+`KratyClientOptions.ChatProfanityFilter` (`bool?`, default null): when set,
+every chat request and the stream send `X-Kraty-Chat-Filter: on|off` (and
+`?filter=on|off` on the stream URL); null = the player's saved preference,
+then the kind's default.
+
+`ChatStream` (SSE, `GET /chat/stream?channels=a,b`): typed callbacks
+`OnReady(ChatStreamReady)`, `OnMessage(ChatMessage)`,
+`OnMessageEdited(ChatMessage)` (`message_edited`, the full updated message),
+`OnMessageDeleted(ChatMessageDeletedEvent)`, `OnTyping(ChatTypingEvent)`,
+`OnRead(ChatReadEvent)`, `OnConversationAdded(ChatConversationAddedEvent)`,
+`OnConversationUpdated(ChatConversationUpdatedEvent)`,
+`OnConversationRemoved(ChatConversationRemovedEvent)`,
+`OnRestriction(ChatRestrictionEvent)`,
+`OnRestrictionLifted(ChatRestrictionLiftedEvent)`, `OnClose(ChatCloseEvent)`;
+plus raw `OnEvent(ChatStreamEvent)`, `OnError(Exception)`, the `Ready`
+payload, `Task CancelAsync()` / `void Dispose()`. Set callbacks inside
+`configure` (runs before the read loop starts). No auto-reconnect: on close,
+reopen and catch up with `MessagesAsync(id, after: lastSeq)`. Event names:
+`ChatStreamEventKind` consts.
+
+## `kraty.Moderation`: `ModerationClient`
+
+```csharp
+Task&lt;MyReport&gt; ReportAsync(ReportPlayerInput input, ...)        // TargetExternalPlayerId, Category, Context?, Comment?, ConversationId?, MessageIds?, GuildId?
+Task&lt;List&lt;MyReport&gt;&gt; ReportsAsync(int? limit = null, ...)
+Task&lt;ModerationStatus&gt; StatusAsync(...)                         // CanChat, CanPost, MutedUntil, ChatBannedUntil, Restrictions
+Task&lt;Restriction&gt; AcknowledgeWarningAsync(string restrictionId, ...)
+```
+
+`/sdk/v1/players/:p/reports` and `/moderation/*`; works in every game (no
+chat add-on needed). Every method ends with `string? @as = null,
+CancellationToken ct = default`. Category / context values:
+`ReportCategory` and `ReportContext` consts.
+
+## `kraty.Players`: `PlayersClient`
+
+```csharp
+Task&lt;PlayerRegistration&gt; RegisterAsync(string externalPlayerId, bool force = false, CancellationToken ct = default)
+Task&lt;PlayerIdentity&gt; SetIdentityAsync(string name, string? avatar = null, string? @as = null, CancellationToken ct = default)
+```
+
+## `kraty.Catalog`: `CatalogClient`
+
+```csharp
+Task&lt;Catalog&gt; GetAsync(CancellationToken ct = default)
+```
+
+## Polling helpers (static)
+
+```csharp
+GrantPolling.PollPendingAsync(GrantsClient grants, string? @as = null, GrantPollOptions? opts = null, CancellationToken ct = default)
+LobbyPolling.UntilActiveAsync(LobbiesClient lobbies, string lobbyId, LobbyPollOptions? opts = null, CancellationToken ct = default)
+```
+
+## Secret stores
+
+```csharp
+ISecretStore                  // interface; implement for custom storage
+InMemorySecretStore           // tests + non-Unity
+PlayerPrefsSecretStore        // Unity, wraps UnityEngine.PlayerPrefs (default on Unity)
+```
+
+## DTOs (response shapes)
+
+`Attempt`, `StartAttemptResponse`, `ProgressResult`, `MilestoneFired`,
+`EventListing`, `EntryCost`, `EntryCostCurrency`, `EntryCostItem`,
+`Leaderboard`, `LeaderboardSummary`, `EventLeaderboard`, `LeaderboardEntry`,
+`LeaderboardSelf`, `ProgressionLimits`, `ProgressionBand`,
+`LeaderboardPeriod`, `LeaderboardPeriods`,
+`Grant`, `OpenCrateResponse`, `Lobby`, `ProgressInput`,
+`PlayerRegistration`, `PlayerItemHolding`, `PlayerWalletHolding`,
+`DailyLogin`, `DailyLoginDay`,
+`GuildClientConfig`, `GuildSummary`, `RecommendedGuild`, `GuildMember`,
+`GuildDetail`, `MyGuild`, `GuildJoinRequest`, `GuildJoinResult`, `GuildLeaveResult`,
+`GuildProfileInput`, `GuildHelpRequest`, `GuildHelpOverview`,
+`GuildHelpDonation`, `GuildPlayerRef`,
+`ChatClientConfig`, `ChatKindConfig`, `ChatMessageRules`, `ChatCustomType`, `ChatRateLimit`,
+`ChatConversation`, `ChatConversationPage`, `ChatMessage`, `ChatMessageSender`, `ChatMessagePage`,
+`ChatMember`, `ChatPeer`, `ChatPlayerRef`, `ChatChannel`, `ChatRequirement`, `ChatPostDenied`,
+`ChatPreferences`, `ChatPreferencesUpdate`, `ChatConversationSettings`, `ChatUnread`,
+`ChatLeaveResult`, `ChatMemberRemoved`, `ChatMessageDeleted`, `ChatReadResult`,
+`ChatStreamEvent`, `ChatStreamReady`, `ChatStreamChannel`, `ChatMessageDeletedEvent`, `ChatTypingEvent`,
+`ChatReadEvent`, `ChatConversationAddedEvent`, `ChatConversationUpdatedEvent`,
+`ChatConversationRemovedEvent`, `ChatRestrictionEvent`, `ChatRestrictionLiftedEvent`, `ChatCloseEvent`,
+`MyReport`, `ReportPlayerInput`, `ModerationStatus`, `Restriction`,
+`ConsumeItemInput`, `ConsumeItemResult`, `DebitWalletInput`,
+`DebitWalletResult`, `Catalog`, `CatalogItem`, `CatalogCurrency`,
+`RewardBundlePreview`, `RewardEntryPreview`, `RewardPolicySummary`,
+`StoredIdentity`, `TeamSeatView`, `TeamGoal`, `TeamSeatMilestone`,
+`TeamSeatState`, `TeamClientOptions`, `TeamRollup`, `TeamRollupMilestone`, `LeaderboardEntryTeam`,
+`EventTeamMember`, `EventTeamMembersPage`, `TeamMatchResult`, `PartnerPlayer`,
+`PartnerInvite`, `RandomPartnerResult`, `PartnerSuggestion`,
+`Offer`, `OfferTier`, `OfferPresentation`, `OfferImpressionResult`,
+`OfferTriggerInput`, `OfferTriggerResult`, `OfferClaim`, `OfferClaimResult`,
+`PurchaseOfferResult`.
+
+`TrackPurchaseInput.OfferInstanceId` (optional);
+`TrackPurchaseResult.Offer` (`PurchaseOfferResult?`, null when not attributed).
+
+## Errors
+
+```csharp
+KratyApiError      // non-2xx response; has Code (KratyErrorCode), Status, Message, Body
+KratyNetworkError  // transport / parse failure
+```
+
+`KratyApiError` boolean helpers:
+`IsLobbyForming`, `IsInsufficientEntryCost`, `IsPlayerSecretInvalid`,
+`IsPlayerAlreadyRegistered`, `IsEntryRequirementFailed`,
+`IsNoLeaderboard`, `IsNoActiveWindow`, `IsMaxAttemptsReached`,
+`IsAttemptExpired`, `IsAttemptCompleted`.
+
+Full `KratyErrorCode` enum: see `Runtime/Errors/KratyErrorCode.cs`.
+</code></pre><script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-python.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script><script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-csharp.min.js"></script><hr><p class=muted>kraty docs mirror — generated $(date -u +%F)</p></body></html>
